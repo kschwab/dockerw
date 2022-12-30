@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+'''
+dockerw
+#######
+
+Docker run wrapper script.
+'''
+
+__version__ = '0.1.0'
+__title__ = 'dockerw'
+__uri__ = 'https://github.com/kschwab/dockerw'
+__author__ = 'Kyle Schwab'
+__summary__ = 'Docker run wrapper script. Provides a super-set of docker run capabilities.'
+__doc__ = __summary__
+
+import argparse
+import copy
+import grp
+import os
+import pathlib
+import platform
+import pwd
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+
+DOCKERW_UID = int(os.environ.get("SUDO_UID", os.getuid()))
+DOCKERW_GID = int(os.environ.get("SUDO_GID", os.getgid()))
+DOCKERW_UNAME = pwd.getpwuid(DOCKERW_UID).pw_name
+DOCKERW_VENV_HOME_PATH = pathlib.PosixPath(f'/.dockerw/home/{DOCKERW_UNAME}')
+DOCKERW_VENV_COPY_PATH = pathlib.PosixPath(f'/.dockerw/copy')
+
+def _run_os_cmd(cmd: str) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, universal_newlines=True)
+
+def _update_volume_paths(volumes: list, is_copy: bool=False) -> list:
+    for volume in range(len(volumes)):
+        src_path, dest_path, options = (volumes[volume].split(':') + [''])[:3]
+        options = options.split(',') if options else []
+        src_path = re.sub(r'^~', pwd.getpwuid(DOCKERW_UID).pw_dir, src_path)
+        src_path = str(pathlib.PosixPath(src_path).resolve())
+        dest_path = re.sub(r'^~', f'/home/{DOCKERW_UNAME}', dest_path)
+        if is_copy == True and not dest_path.startswith(str(DOCKERW_VENV_COPY_PATH)):
+            dest_path = str(DOCKERW_VENV_COPY_PATH / dest_path.lstrip(os.sep))
+            if 'ro' not in options:
+                options = [ opt for opt in options if opt != 'rw'] + ['ro']
+        elif dest_path.startswith(f'/home/{DOCKERW_UNAME}'):
+            dest_path = dest_path.replace(f'/home/{DOCKERW_UNAME}', f'{DOCKERW_VENV_HOME_PATH}', 1)
+        volumes[volume] = ':'.join([src_path] + [dest_path] + options)
+    return volumes
+
+def _parse(parser: argparse.ArgumentParser, args: dict) -> tuple:
+    parsed_args, image_cmd = parser.parse_known_args(shlex.split(' '.join(args if args != None else [])))
+    parsed_args = vars(parsed_args)
+    return { arg: parsed_args[arg] for arg in parsed_args if parsed_args[arg] not in [None, False] }, image_cmd
+
+def _merge_parsed_args(parsed_args: dict, new_args: dict) -> None:
+    for new_arg in new_args:
+        if new_arg in parsed_args:
+            if isinstance(parsed_args[new_arg], list):
+                parsed_args[new_arg] = list(set(parsed_args[new_arg] + new_args[new_arg]))
+        else:
+            parsed_args[new_arg] = new_args[new_arg]
+
+def _parse_docker_run_args(args: list=sys.argv[1:]) -> list:
+    if args == [] or args[0] != 'run':
+        return []
+    args.pop(0)
+    try:
+        load_path = re.search(r'--load\s*=?\s*([^\s]+)', ' '.join(args)).group(1)
+        os.chdir(pathlib.Path(re.sub(r'^~', pwd.getpwuid(DOCKERW_UID).pw_dir, load_path)).resolve())
+    except FileNotFoundError:
+        print(f'Error: Load path does not exist: {load_path}', file=sys.stderr)
+        exit(1)
+    except AttributeError:
+        args.insert(0, f'--load=""')
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--help', dest='dockerw_help', action='store_const', const=parser, default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--version', dest='dockerw_version', action='store_true', default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--load', dest='dockerw_load', metavar='string', help='Load dockerw project')
+    parser.add_argument('--image-default', dest='dockerw_image_default', metavar='string', help='Default image if not specified')
+    parser.add_argument('--defaults', dest='dockerw_defaults', action='store_true', default=None, help='Enable dockerw default args')
+    parser.add_argument('--x11', dest='dockerw_x11', action='store_true', default=None, help='Enable x11 support if possible')
+    parser.add_argument('--venv', dest='dockerw_venv', action='store_true', default=None, help='Enable user creation')
+    parser.add_argument('--copy', dest='dockerw_copy', metavar='list', action='append',
+                        help='Bind mount and copy a volume (venv must be enabled)')
+    dockerw_long_flags = [ f'--{arg.replace("dockerw_","").replace("_","-")}' for arg in vars(parser.parse_args([])).keys() ]
+    for line in _run_os_cmd('docker run --help').stdout.splitlines():
+        matched = re.match(r'\s*(?P<short>-\w)?,?\s*(?P<long>--[^\s]+)\s+(?P<val_type>[^\s]+)?\s{4,}(?P<help>\w+.*)', line)
+        if matched:
+            arg = matched.groupdict()
+            if arg["long"] not in dockerw_long_flags:
+                flags = (arg['short'], arg['long']) if arg['short'] else (arg['long'],)
+                if arg['val_type'] == 'list':
+                    parser.add_argument(*flags, action='append', help=argparse.SUPPRESS)
+                elif arg['val_type']:
+                    parser.add_argument(*flags, nargs=1, help=argparse.SUPPRESS)
+                else:
+                    parser.add_argument(*flags, action='store_true', default=False, help=argparse.SUPPRESS)
+    while True:
+        parsed_args, parsed_image_cmd = _parse(parser, args)
+        parsed_dockerw_args = [ arg_name for arg_name in parsed_args if arg_name.startswith('dockerw') ]
+        if parsed_dockerw_args:
+            for arg_name in parsed_dockerw_args:
+                new_args, new_image_cmd = _parse(parser, eval(f'_{arg_name}_args(parsed_args, parsed_image_cmd)'))
+                assert new_image_cmd == [], 'Parsed dockerw arg created new image command'
+                parsed_args.pop(arg_name)
+                _merge_parsed_args(parsed_args, new_args)
+        args = []
+        for arg_name in parsed_args:
+            arg_value = parsed_args[arg_name]
+            arg_name = arg_name.replace("dockerw_","")
+            if isinstance(arg_value, str):
+                args.append(f'--{arg_name.replace("_","-")}={arg_value}')
+            elif isinstance(arg_value, list):
+                if arg_name == 'volume':
+                    _update_volume_paths(arg_value)
+                args += [ f'--{arg_name.replace("_","-")}={val}' for val in arg_value ]
+            else:
+                args.append(f'--{arg_name.replace("_","-")}')
+        if set(dockerw_long_flags).intersection(set(args)) != set():
+            args += parsed_image_cmd
+            continue
+        break
+
+    if '--env=DOCKERW_VENV=1' in args:
+        oldmask = os.umask(0o000)
+        pathlib.Path('/tmp/dockerw').mkdir(parents=True, exist_ok=True)
+        os.umask(oldmask)
+        venv_file = tempfile.NamedTemporaryFile('w', dir='/tmp/dockerw', delete=False)
+        venv_file.write('\n'.join([
+            f'rm {venv_file.name}',
+            f'export DOCKERW_VENV_IMG="{parsed_image_cmd[0]}"',
+            f'EXISTING_USER=$(awk -v uid={DOCKERW_UID} -F":" \'{{ if($3==uid){{print $1}} }}\' /etc/passwd 2>/dev/null)',
+            f'if [ -n "$EXISTING_USER" ]; then',
+            f'  if userdel --help > /dev/null 2>&1; then',
+            f'    userdel $EXISTING_USER > /dev/null 2>&1',
+            f'  else',
+            f'    deluser $EXISTING_USER > /dev/null 2>&1',
+            f'  fi',
+            f'  mv /home/$EXISTING_USER /home/_venv_orig_user_$EXISTING_USER',
+            f'fi',
+            f'if groupadd --help > /dev/null 2>&1; then',
+            f'  groupadd -g {DOCKERW_GID} {DOCKERW_UNAME} > /dev/null 2>&1',
+            f'  useradd -u {DOCKERW_UID} -m {DOCKERW_UNAME} -g {DOCKERW_GID} > /dev/null 2>&1',
+            f'else',
+            f'  addgroup -g {DOCKERW_GID} {DOCKERW_UNAME} > /dev/null 2>&1',
+            f'  adduser -u {DOCKERW_UID} -D {DOCKERW_UNAME} -G {DOCKERW_UNAME} > /dev/null 2>&1',
+            f'fi',
+            f'mkdir -p /home/{DOCKERW_UNAME}',
+            f'cp -a /home/{DOCKERW_UNAME} /.dockerw/home',
+            f'rm -rf /home/{DOCKERW_UNAME}',
+            f'mv {DOCKERW_VENV_HOME_PATH} /home',
+            f'rmdir {DOCKERW_VENV_HOME_PATH.parent} > /dev/null 2>&1',
+            f'rmdir {DOCKERW_VENV_HOME_PATH.parent.parent} > /dev/null 2>&1',
+            f'passwd -d {DOCKERW_UNAME} > /dev/null 2>&1',
+            f'usermod -aG wheel {DOCKERW_UNAME} > /dev/null 2>&1',
+            f'echo "{DOCKERW_UNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers',
+            f'ln -s $PWD /home/{DOCKERW_UNAME}/${{PWD##*/}} > /dev/null 2>&1',
+            f'chown -h {DOCKERW_UID}:{DOCKERW_GID} /home/{DOCKERW_UNAME}/${{PWD##*/}} > /dev/null 2>&1',
+            f'export ENV=/home/{DOCKERW_UNAME}/.bashrc',
+            f'echo unset PROMPT_COMMAND >> /home/{DOCKERW_UNAME}/.bashrc',
+            fr'echo export PS1=\"\\e[7m📦{parsed_image_cmd[0]}\\e[0m\\n[\\u@\\h \\W]\\\\$ \" >> /home/{DOCKERW_UNAME}/.bashrc',
+            f'export HOME=/home/{DOCKERW_UNAME}']) + '\n')
+        for path in [ pathlib.Path(volume.split(':')[1]) for volume in args if volume.startswith('--volume=') ]:
+            if str(path).startswith(str(DOCKERW_VENV_COPY_PATH)):
+                venv_file.write(f'mkdir -p /{path.relative_to(DOCKERW_VENV_COPY_PATH).parent}\n')
+                cp_cmd = f'cp -af {path} /{path.relative_to(DOCKERW_VENV_COPY_PATH)}'
+                venv_file.write(f'if [ -r "{path}" ]; then {cp_cmd}; else su $(stat -c "%U" {path}) -c "{cp_cmd}"; fi\n')
+        if len(parsed_image_cmd) == 1:
+            cmd = '$SHELL'
+        elif '--' == parsed_image_cmd[1]:
+            cmd = ' '.join(parsed_image_cmd[2:]) if parsed_image_cmd[2:] != [] else '$SHELL'
+        else:
+            cmd = ' '.join(parsed_image_cmd[1:])
+        venv_file.write('\n'.join([
+            f'if bash --help > /dev/null 2>&1; then SHELL=bash; else SHELL=sh; fi',
+            f'if chroot --userspec={DOCKERW_UID}:{DOCKERW_GID} / id > /dev/null 2>&1; then',
+            f'  chroot --userspec={DOCKERW_UID}:{DOCKERW_GID} --skip-chdir / {cmd}',
+            f'else',
+            f'  exec su -p {DOCKERW_UNAME} -c "{cmd}"',
+            f'fi']) + '\n')
+        venv_file.close()
+        args.append('--volume=/tmp/dockerw:/tmp/dockerw')
+        parsed_image_cmd = [parsed_image_cmd[0], '--', venv_file.name]
+    return ['docker', 'run'] + args + parsed_image_cmd
+
+def _dockerw_help_args(parsed_args: dict, parsed_image_cmd: list) -> None:
+    print(_run_os_cmd('docker run --help').stdout.replace('docker run', 'dockerw'))
+    print('Dockerw Options:')
+    print(parsed_args['dockerw_help'].format_help().split('options:')[-1].lstrip('\n'))
+    exit(0)
+
+def _dockerw_version_args(parsed_args: dict, parsed_image_cmd: list) -> None:
+    print('Dockerw version', __version__)
+    print(_run_os_cmd('docker --version').stdout.rstrip())
+    exit(0)
+
+def _dockerw_image_default_args(parsed_args: dict, parsed_image_cmd: list) -> list:
+    if parsed_image_cmd == [] or parsed_image_cmd[0] == '--':
+        parsed_image_cmd.insert(0, parsed_args['dockerw_image_default'])
+    return []
+
+def _dockerw_x11_args(parsed_args: dict, parsed_image_cmd: list) -> list:
+    if os.geteuid() != 0:
+        result = _run_os_cmd('xauth info | grep "Authority file" | awk \'{ print $3 }\'')
+    else:
+        result = _run_os_cmd(f'su {DOCKERW_UNAME} -c "xauth info" | grep "Authority file" | awk \'{{ print $3 }}\'')
+    if result.returncode == 0 and pathlib.PosixPath('/tmp/.X11-unix').exists():
+        return ['-e=DISPLAY', '-v=/tmp/.X11-unix:/tmp/.X11-unix:ro',
+                f'-v={result.stdout.strip()}:~/.Xauthority:ro']
+    return []
+
+def _dockerw_venv_args(parsed_args: dict, parsed_image_cmd: list) -> list:
+    return ['--user=root', '--entrypoint=sh', '-e=DOCKERW_VENV=1'] if 'user' not in parsed_args else []
+
+def _dockerw_copy_args(parsed_args: dict, parsed_image_cmd: list) -> list:
+    return [ f'-v {arg}' for arg in _update_volume_paths(parsed_args['dockerw_copy'], True) ]
+
+def _dockerw_load_args(parsed_args: dict, parsed_image_cmd: list) -> list:
+    if parsed_args['dockerw_load'] == '':
+        loads = [pathlib.Path.cwd(), *pathlib.Path.cwd().parents]
+    else:
+        loads = [pathlib.Path.cwd()]
+    for load in loads:
+        dockerw_defaults_file_path = load / pathlib.Path('.dockerw/defaults.py')
+        if dockerw_defaults_file_path.exists() == True:
+            cfg = {'__file__': str(dockerw_defaults_file_path)}
+            exec(open(dockerw_defaults_file_path).read(), cfg)
+            return cfg.get('dockerw_defaults', [])
+    return []
+
+def _dockerw_defaults_args(parsed_args: dict, parsed_image_cmd: list) -> list:
+    defaults = ['-it --venv --x11 --rm --init --privileged --network host --security-opt seccomp=unconfined',
+                f'--detach-keys=ctrl-q,ctrl-q --hostname {platform.node()} -e TERM=xterm-256color']
+    for action, paths in [('volume', ['~/.bash_history', '~/.vscode', '~/.emacs', '~/.emacs.d', '~/.vimrc']),
+                          ('copy',   ['~/.gitconfig', '~/.ssh'])]:
+        for path in paths:
+            src_path = pathlib.PosixPath(re.sub(r'^~', pwd.getpwuid(DOCKERW_UID).pw_dir, path)).resolve()
+            if src_path.exists():
+                defaults.append(f'--{action} {src_path}:{path}')
+    if 'workdir' not in parsed_args:
+        defaults.append('-w /app')
+        defaults.append(f'-v {pathlib.Path.cwd()}:/app')
+    return defaults
+
+def main() -> int:
+    docker_run_cmd = _parse_docker_run_args()
+    if docker_run_cmd:
+        os.execvpe(docker_run_cmd[0], docker_run_cmd, env=os.environ.copy())
+    else:
+        sys.argv[0] = 'docker'
+        os.execvpe(sys.argv[0], sys.argv, env=os.environ.copy())
+    return 1
+
+if __name__ == '__main__':
+    exit(main())
