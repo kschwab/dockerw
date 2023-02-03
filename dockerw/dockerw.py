@@ -6,7 +6,18 @@ dockerw
 Docker run wrapper script.
 '''
 
-__version__ = '0.2.0'
+# To install latest version of dockerw (script only):
+# wget -nv https://raw.githubusercontent.com/kschwab/dockerw/main/dockerw/dockerw.py -O dockerw && chmod a+x dockerw
+
+# To install specific version of dockerw (script only):
+# wget -nv https://raw.githubusercontent.com/kschwab/dockerw/<VERSION>/dockerw/dockerw.py -O dockerw && chmod a+x dockerw
+
+# Given a version number MAJOR.MINOR.PATCH, increment the:
+#  1. MAJOR version when you make incompatible API changes
+#  2. MINOR version when you add functionality in a backwards compatible manner
+#  3. PATCH version when you make backwards compatible bug fixes
+# Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
+__version__ = '0.2.1'
 __title__ = 'dockerw'
 __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
@@ -180,8 +191,7 @@ def _parse_docker_run_args(args: list=sys.argv[1:]) -> list:
             fr'echo export PS1=\"\\e[7m📦{parsed_image_cmd[0]}\\e[0m\\n[\\u@\\h \\W]\\\\$ \" >> /home/{DOCKERW_UNAME}/.bashrc',
             f'export HOME=/home/{DOCKERW_UNAME}',
             f'if bash --help > /dev/null 2>&1; then SHELL=bash; else SHELL=sh; fi',
-            f'function run_user_cmd()',
-            f'{{',
+            f'run_user_cmd() {{',
             f'  local _USERSPEC=$1; shift',
             f'  local _USERNAME=$1; shift',
             f'  if chroot --userspec=$_USERSPEC --skip-chdir / id > /dev/null 2>&1; then',
