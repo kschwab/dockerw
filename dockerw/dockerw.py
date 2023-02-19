@@ -12,12 +12,13 @@ Docker run wrapper script.
 # To install specific version of dockerw (script only):
 # wget -nv https://raw.githubusercontent.com/kschwab/dockerw/<VERSION>/dockerw/dockerw.py -O dockerw && chmod a+x dockerw
 
+# SemVer 2.0.0 (https://github.com/semver/semver/blob/master/semver.md)
 # Given a version number MAJOR.MINOR.PATCH, increment the:
 #  1. MAJOR version when you make incompatible API changes
 #  2. MINOR version when you add functionality in a backwards compatible manner
 #  3. PATCH version when you make backwards compatible bug fixes
 # Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
-__version__ = '0.2.1'
+__version__ = '0.7.12'
 __title__ = 'dockerw'
 __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
@@ -40,26 +41,48 @@ import tempfile
 DOCKERW_UID = int(os.environ.get("SUDO_UID", os.getuid()))
 DOCKERW_GID = int(os.environ.get("SUDO_GID", os.getgid()))
 DOCKERW_UNAME = pwd.getpwuid(DOCKERW_UID).pw_name
-DOCKERW_VENV_HOME_PATH = pathlib.PosixPath(f'/.dockerw/home/{DOCKERW_UNAME}')
-DOCKERW_VENV_COPY_PATH = pathlib.PosixPath(f'/.dockerw/copy')
+DOCKERW_VENV_PATH = pathlib.PosixPath(f'/.dockerw')
+DOCKERW_VENV_HOME_PATH = DOCKERW_VENV_PATH / f'home/{DOCKERW_UNAME}'
+DOCKERW_VENV_COPY_PATH = DOCKERW_VENV_PATH / 'copy'
+DOCKERW_VENV_RC_PATH   = DOCKERW_VENV_PATH / 'rc'
 
 def _run_os_cmd(cmd: str) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, universal_newlines=True)
 
+def _login_message() -> str:
+    return \
+fr"""                 ,,))))))));,
+              __)))))))))))))),
+   \|/       -\(((((''''((((((((.     .----------------------------.
+   -*-==//////((''  .     `)))))),   /  DOCKERW VENV _____________)
+   /|\      ))| o    ;-.    '(((((  /            _______________)   ,(,
+            ( `|    /  )    ;))))' /         _______________)    ,_))^;(~
+               |   |   |   ,))((((_/      ________) __          %,;(;(>';'~
+               o_);   ;    )))(((`    \ \   ~---~  `:: \       %%~~)(v;(`('~
+                     ;    ''''````         `:       `:: |\,__,%%    );`'; ~ %
+                    |   _                )     /      `:|`----'     `-'
+              ______/\/~    |                 /        /
+            /~;;.____/;;'  /          ___--,-(   `;;;/
+           / //  _;______;'------~~~~~    /;;/\    /
+          //  | |                        / ;   \;;,\
+         (<_  | ;                      /',/-----'  _>
+          \_| ||_                     //~;~~~~~~~~~"""
+
 def _update_volume_paths(volumes: list, is_copy: bool=False) -> list:
     for volume in range(len(volumes)):
         src_path, dest_path, options = (volumes[volume].split(':') + [''])[:3]
-        options = options.split(',') if options else []
         src_path = re.sub(r'^~', pwd.getpwuid(DOCKERW_UID).pw_dir, src_path)
         src_path = str(pathlib.PosixPath(src_path).resolve())
         dest_path = re.sub(r'^~', f'/home/{DOCKERW_UNAME}', dest_path)
         if is_copy == True and not dest_path.startswith(str(DOCKERW_VENV_COPY_PATH)):
+            options = options.split(',') if options else []
             dest_path = str(DOCKERW_VENV_COPY_PATH / dest_path.lstrip(os.sep))
             if 'ro' not in options:
                 options = [ opt for opt in options if opt != 'rw'] + ['ro']
+            options = ','.join(options)
         elif dest_path.startswith(f'/home/{DOCKERW_UNAME}'):
             dest_path = dest_path.replace(f'/home/{DOCKERW_UNAME}', f'{DOCKERW_VENV_HOME_PATH}', 1)
-        volumes[volume] = ':'.join([src_path] + [dest_path] + options)
+        volumes[volume] = f'{src_path}:{dest_path}{":" + options if options else ""}'
     return volumes
 
 def _parse(parser: argparse.ArgumentParser, args: dict) -> tuple:
@@ -75,18 +98,16 @@ def _merge_parsed_args(parsed_args: dict, new_args: dict) -> None:
         else:
             parsed_args[new_arg] = new_args[new_arg]
 
-def _parse_docker_run_args(args: list=sys.argv[1:]) -> list:
-    if args == [] or args[0] != 'run':
-        return []
-    args.pop(0)
+def dockerw_run(args: list) -> None:
     try:
         load_path = re.search(r'--load\s*=?\s*([^\s]+)', ' '.join(args)).group(1)
         os.chdir(pathlib.Path(re.sub(r'^~', pwd.getpwuid(DOCKERW_UID).pw_dir, load_path)).resolve())
     except FileNotFoundError:
-        print(f'Error: Load path does not exist: {load_path}', file=sys.stderr)
-        exit(1)
+        exit(f'Error: Load path does not exist: {load_path}')
     except AttributeError:
-        args.insert(0, f'--load=""')
+        defaults_file_path = find_nearest_defaults_file_path()
+        if defaults_file_path:
+            args.insert(0, f'--load={defaults_file_path.parent.parent}')
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--help', dest='dockerw_help', action='store_const', const=parser, default=None, help=argparse.SUPPRESS)
     parser.add_argument('--version', dest='dockerw_version', action='store_true', default=None, help=argparse.SUPPRESS)
@@ -101,6 +122,8 @@ def _parse_docker_run_args(args: list=sys.argv[1:]) -> list:
                         help='Print dockerw args generated by "--defaults" flag')
     parser.add_argument('--copy', dest='dockerw_copy', metavar='list', action='append',
                         help='Bind mount and copy a volume (venv must be enabled)')
+    parser.add_argument('--prompt-banner', dest='dockerw_prompt_banner', default=None,
+                        help='CLI prompt banner to display. Default is docker image name (venv must be enabled)')
     dockerw_long_flags = [ f'--{arg.replace("dockerw_","").replace("_","-")}' for arg in vars(parser.parse_args([])).keys() ]
     for line in _run_os_cmd('docker run --help').stdout.splitlines():
         matched = re.match(r'\s*(?P<short>-\w)?,?\s*(?P<long>--[^\s]+)\s+(?P<val_type>[^\s]+)?\s{4,}(?P<help>\w+.*)', line)
@@ -125,8 +148,10 @@ def _parse_docker_run_args(args: list=sys.argv[1:]) -> list:
                 parsed_args.pop(arg_name)
                 _merge_parsed_args(parsed_args, new_args)
         args = []
+        is_dockerw_flag_found = False
         for arg_name in parsed_args:
             arg_value = parsed_args[arg_name]
+            is_dockerw_flag_found = arg_name.startswith('dockerw') or is_dockerw_flag_found
             arg_name = arg_name.replace("dockerw_","")
             if isinstance(arg_value, str):
                 args.append(f'--{arg_name.replace("_","-")}={arg_value}')
@@ -136,7 +161,7 @@ def _parse_docker_run_args(args: list=sys.argv[1:]) -> list:
                 args += [ f'--{arg_name.replace("_","-")}={val}' for val in arg_value ]
             else:
                 args.append(f'--{arg_name.replace("_","-")}')
-        if set(dockerw_long_flags).intersection(set(args)) != set():
+        if is_dockerw_flag_found:
             args += parsed_image_cmd
             continue
         break
@@ -151,73 +176,159 @@ def _parse_docker_run_args(args: list=sys.argv[1:]) -> list:
         pathlib.Path('/tmp/dockerw').mkdir(parents=True, exist_ok=True)
         os.umask(oldmask)
         venv_file = tempfile.NamedTemporaryFile('w', dir='/tmp/dockerw', delete=False)
-        venv_file.write('\n'.join([
-            f'rm {venv_file.name}',
-            f'export DOCKERW_VENV_IMG="{parsed_image_cmd[0]}"',
-            f'EXISTING_USER=$(awk -v uid={DOCKERW_UID} -F":" \'{{ if($3==uid){{print $1}} }}\' /etc/passwd 2>/dev/null)',
-            f'if [ -n "$EXISTING_USER" ]; then',
-            f'  if userdel --help > /dev/null 2>&1; then',
-            f'    userdel $EXISTING_USER > /dev/null 2>&1',
-            f'  else',
-            f'    deluser $EXISTING_USER > /dev/null 2>&1',
-            f'  fi',
-            f'  mv /home/$EXISTING_USER /home/_venv_orig_user_$EXISTING_USER',
-            f'fi',
-            f'if groupadd --help > /dev/null 2>&1; then',
-            f'  groupadd -g {DOCKERW_GID} {DOCKERW_UNAME} > /dev/null 2>&1',
-            f'  useradd -u {DOCKERW_UID} -m {DOCKERW_UNAME} -g {DOCKERW_GID} > /dev/null 2>&1',
-            f'  groupadd -g {os.stat("/var/run/docker.sock").st_gid} dood > /dev/null 2>&1' if 'dockerw_dood' in post_args else '',
-            f'  usermod -aG dood {DOCKERW_UNAME} > /dev/null 2>&1' if 'dockerw_dood' in post_args else '',
-            f'  usermod -aG wheel {DOCKERW_UNAME} > /dev/null 2>&1',
-            f'else',
-            f'  addgroup -g {DOCKERW_GID} {DOCKERW_UNAME} > /dev/null 2>&1',
-            f'  adduser -u {DOCKERW_UID} -D {DOCKERW_UNAME} -G {DOCKERW_UNAME} > /dev/null 2>&1',
-            f'  addgroup -g {os.stat("/var/run/docker.sock").st_gid} dood > /dev/null 2>&1' if 'dockerw_dood' in post_args else '',
-            f'  addgroup {DOCKERW_UNAME} dood > /dev/null 2>&1' if 'dockerw_dood' in post_args else '',
-            f'  addgroup {DOCKERW_UNAME} wheel > /dev/null 2>&1',
-            f'fi',
-            f'mkdir -p /home/{DOCKERW_UNAME}',
-            f'cp -a /home/{DOCKERW_UNAME} /.dockerw/home',
-            f'rm -rf /home/{DOCKERW_UNAME}',
-            f'mv {DOCKERW_VENV_HOME_PATH} /home',
-            f'rmdir {DOCKERW_VENV_HOME_PATH.parent} > /dev/null 2>&1',
-            f'rmdir {DOCKERW_VENV_HOME_PATH.parent.parent} > /dev/null 2>&1',
-            f'passwd -d {DOCKERW_UNAME} > /dev/null 2>&1',
-            f'echo "{DOCKERW_UNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers',
-            f'ln -s $PWD /home/{DOCKERW_UNAME}/${{PWD##*/}} > /dev/null 2>&1',
-            f'chown -h {DOCKERW_UID}:{DOCKERW_GID} /home/{DOCKERW_UNAME}/${{PWD##*/}} > /dev/null 2>&1',
-            f'export ENV=/home/{DOCKERW_UNAME}/.bashrc',
-            f'echo unset PROMPT_COMMAND >> /home/{DOCKERW_UNAME}/.bashrc',
-            fr'echo export PS1=\"\\e[7m📦{parsed_image_cmd[0]}\\e[0m\\n[\\u@\\h \\W]\\\\$ \" >> /home/{DOCKERW_UNAME}/.bashrc',
-            f'export HOME=/home/{DOCKERW_UNAME}',
-            f'if bash --help > /dev/null 2>&1; then SHELL=bash; else SHELL=sh; fi',
-            f'run_user_cmd() {{',
-            f'  local _USERSPEC=$1; shift',
-            f'  local _USERNAME=$1; shift',
-            f'  if chroot --userspec=$_USERSPEC --skip-chdir / id > /dev/null 2>&1; then',
-            f'    $EXEC chroot --userspec=$_USERSPEC --skip-chdir / "$@"',
-            f'  elif su -p $_USERNAME --session-command "id" > /dev/null 2>&1; then',
-            f'    $EXEC su -p $_USERNAME --session-command "$*"',
-            f'  else',
-            f'    $EXEC su -p $_USERNAME -c "$*"',
-            f'  fi',
-            f'}}']) + '\n')
-        for path in [ pathlib.Path(volume.split(':')[1]) for volume in args if volume.startswith('--volume=') ]:
-            if str(path).startswith(str(DOCKERW_VENV_COPY_PATH)):
-                venv_file.write(f'mkdir -p /{path.relative_to(DOCKERW_VENV_COPY_PATH).parent}\n')
-                cp_cmd = f'cp -af {path} /{path.relative_to(DOCKERW_VENV_COPY_PATH)}'
-                venv_file.write(f'if [ -r "{path}" ]; then {cp_cmd}; else run_user_cmd $(stat -c "%u:%g %U" {path}) {cp_cmd}; fi\n')
+        args.append(f'--env=DOCKERW_VENV_IMG="{parsed_image_cmd[0]}"')
+        prompt_banner = post_args.get('dockerw_prompt_banner', parsed_image_cmd[0])
+        args.append(f'--env=DOCKERW_LOGIN_MESSAGE={_login_message()}')
+        blue, green, normal, invert, jump = '\033[34m', '\033[32m', '\033[0m', '\033[7m', '\033[64G'
+        print(f'# shellcheck disable=SC2148',
+              f'if [ -z "$SHELL" ]; then SHELL="$(command -v sh)"; export SHELL; fi',
+              f'if [ "$(basename "$SHELL")" = "sh" ]; then',
+              f'  if bash --help > /dev/null 2>&1; then SHELL="$(command -v bash)"; export SHELL; fi',
+              f'fi',
+              f'mkdir -p {DOCKERW_VENV_HOME_PATH}',
+              f'mv {venv_file.name} {DOCKERW_VENV_HOME_PATH}/.dockerw_entrypoint.sh',
+              f'EXISTING_USER=$(awk -v uid={DOCKERW_UID} -F":" \'{{ if($3==uid){{print $1}} }}\' /etc/passwd 2>/dev/null)',
+              f'if [ -n "$EXISTING_USER" ]; then',
+              f'  if userdel --help > /dev/null 2>&1; then',
+              f'    userdel "$EXISTING_USER" > /dev/null 2>&1',
+              f'  else',
+              f'    deluser "$EXISTING_USER" > /dev/null 2>&1',
+              f'  fi',
+              f'  mv /home/"$EXISTING_USER" /home/_venv_orig_user_"$EXISTING_USER"',
+              f'fi',
+              f'if groupadd --help > /dev/null 2>&1; then',
+              f'  groupadd -g {DOCKERW_GID} {DOCKERW_UNAME} > /dev/null 2>&1',
+              f'  useradd -s "$SHELL" -u {DOCKERW_UID} -m {DOCKERW_UNAME} -g {DOCKERW_GID} > /dev/null 2>&1',
+              f'  {"" if "dockerw_dood" in post_args else "# "}groupadd -g {os.stat("/var/run/docker.sock").st_gid} dood > /dev/null 2>&1',
+              f'  {"" if "dockerw_dood" in post_args else "# "}usermod -aG dood {DOCKERW_UNAME} > /dev/null 2>&1',
+              f'  usermod -aG wheel {DOCKERW_UNAME} > /dev/null 2>&1',
+              f'else',
+              f'  addgroup -g {DOCKERW_GID} {DOCKERW_UNAME} > /dev/null 2>&1',
+              f'  adduser -s "$SHELL" -u {DOCKERW_UID} -D {DOCKERW_UNAME} -G {DOCKERW_UNAME} > /dev/null 2>&1',
+              f'  {"" if "dockerw_dood" in post_args else "# "}addgroup -g {os.stat("/var/run/docker.sock").st_gid} dood > /dev/null 2>&1',
+              f'  {"" if "dockerw_dood" in post_args else "# "}addgroup {DOCKERW_UNAME} dood > /dev/null 2>&1',
+              f'  addgroup {DOCKERW_UNAME} wheel > /dev/null 2>&1',
+              f'fi',
+              f'mkdir -p /home/{DOCKERW_UNAME}',
+              f'cp -a /home/{DOCKERW_UNAME} /.dockerw/home',
+              f'rm -rf /home/{DOCKERW_UNAME}',
+              f'mv {DOCKERW_VENV_HOME_PATH} /home',
+              f'rmdir {DOCKERW_VENV_HOME_PATH.parent} > /dev/null 2>&1',
+              f'rmdir {DOCKERW_VENV_HOME_PATH.parent.parent} > /dev/null 2>&1',
+              f'passwd -d {DOCKERW_UNAME} > /dev/null 2>&1',
+              f'echo "{DOCKERW_UNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers',
+              f'ln -s "$PWD" /home/{DOCKERW_UNAME}/workdir > /dev/null 2>&1',
+              f'chown -h {DOCKERW_UID}:{DOCKERW_GID} /home/{DOCKERW_UNAME}/workdir > /dev/null 2>&1',
+              f'# shellcheck disable=SC2129',
+              f'echo \'# shellcheck disable=SC2148\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo unset PROMPT_COMMAND >> {DOCKERW_VENV_RC_PATH}',
+              f'# shellcheck disable=SC2016',
+              f'echo \'HOSTNAME="${{HOSTNAME:-{platform.node()}}}"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'export HOSTNAME\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo _g=\"{green}\" >> {DOCKERW_VENV_RC_PATH}',
+              f'echo _b=\"{blue}\" >> {DOCKERW_VENV_RC_PATH}',
+              f'echo _i=\"{invert}\" >> {DOCKERW_VENV_RC_PATH}',
+              f'echo _n=\"{normal}\" >> {DOCKERW_VENV_RC_PATH}',
+              f'# shellcheck disable=SC2016',
+              f'echo \'_curr_shell=\"$(command -v "$0")\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'if readlink -f \"$_curr_shell\" > /dev/null 2>&1; then _curr_shell=\"$(readlink -f \"$_curr_shell\")\"; fi\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'case "$(basename "$_curr_shell\")" in\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'  dash|ksh)\' >> {DOCKERW_VENV_RC_PATH}',
+              f'# shellcheck disable=SC2028,SC2016',
+              f'echo \'    _PS1_USER="$(whoami)"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    PS1="$_i📦{prompt_banner}$_n\\n$_g$_PS1_USER@$HOSTNAME$_n $_b\\$PWD$_n\\n\\$ " ;;\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'  *)\' >> {DOCKERW_VENV_RC_PATH}',
+              f'# shellcheck disable=SC2028,SC2016',
+              f'echo \'    PS1="$_i📦{prompt_banner}$_n\\n$_g\\u@\\h$_n $_b\\w$_n\\n\\$ " ;;\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'esac\' >> {DOCKERW_VENV_RC_PATH}',
+              f'# shellcheck disable=SC2016,SC2129',
+              f'echo \'if [ "$*" = "$SHELL" ] || [ "$*" = "" ]; then\' >> {DOCKERW_VENV_RC_PATH}',
+              f'# shellcheck disable=SC2016',
+              f'echo \'  if [ -n "$DOCKERW_LOGIN_MESSAGE" ]; then\' >> {DOCKERW_VENV_RC_PATH}',
+              fr"echo '    _uptime'=\"\$\(awk \'{{ printf \"%d\", \$1 }}\' /proc/uptime\)\" >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _minutes'=\$\(\(_uptime / 60\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _hours'=\$\(\(_minutes / 60\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _minutes'=\$\(\(_minutes % 60\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _days'=\$\(\(_hours / 24\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _hours'=\$\(\(_hours % 24\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _weeks'=\$\(\(_days / 7\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _days'=\$\(\(_days % 7\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _uptime'=\"up \$_weeks weeks, \$_days days, \$_hours hours, \$_minutes minutes\" >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _cpu_name'=\$\(grep -m 1 \'model name[[:space:]]*:\' /proc/cpuinfo \| cut -d \' \' -f 3- \| sed \'s/\(R\)/®/g\; s/\(TM\)/™/g\;\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _cpu_vcount'=\$\(grep -io \'processor[[:space:]]*:\' /proc/cpuinfo \| wc -l\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _cpu'=\"\$_cpu_name \(\$_cpu_vcount vCPU\)\" >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _mem_total'=\$\(grep \'MemTotal:\' /proc/meminfo \| awk \'{{ print \$2 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _mem_avail'=\$\(grep \'MemAvailable:\' /proc/meminfo \| awk \'{{ print \$2 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _mem_used'=\$\(\(_mem_total - _mem_avail\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _mem_used'=\$\(awk -v mem_kb=\"\$_mem_used\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _mem_total'=\$\(awk -v mem_kb=\"\$_mem_total\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _mem_avail'=\$\(awk -v mem_kb=\"\$_mem_avail\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _mem'=\"\$_mem_used used, \$_mem_total total \(\$_mem_avail avail\)\" >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _disk_free'=\$\(df -H / \| awk \'FNR == 2 {{ print \$4 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _disk_used'=\$\(df -H / \| awk \'FNR == 2 {{ print \$3 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              f'# shellcheck disable=SC2016',
+              f'echo \'    echo "$DOCKERW_LOGIN_MESSAGE"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    echo \"$_g─────────────╴$_n\\`\-| $_g─────────────────$_n \\(,~~ $_g──────────────────────────────────────\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$_n \~| $_g━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    printf \"┃$_n      CPU $_g┃$_n %-54.54s{jump} $_g┃$_n  DISK SPACE  $_g┃\\\\n\" \"$_cpu\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    printf \"┃$_n      RAM $_g┃$_n %-51.51s $_g┃$_n free %7s $_g┃\\\\n\" \"$_mem\" \"$_disk_free\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    printf \"┃$_n   UPTIME $_g┃$_n %-51.51s $_g┃$_n used %7s $_g┃$_n\\\\n\" \"$_uptime\" \"$_disk_used\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    unset DOCKERW_LOGIN_MESSAGE\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'  fi\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'fi\' >> {DOCKERW_VENV_RC_PATH}',
+              f'# shellcheck disable=SC2016',
+              f'echo \'if [ "$(id -u)" != "{DOCKERW_UID}" ] && [ "$SUDO_UID" != "{DOCKERW_UID}" ]; then\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo "  cd $PWD || exit" >> {DOCKERW_VENV_RC_PATH}',
+              f'echo "  HOME=/home/{DOCKERW_UNAME}" >> {DOCKERW_VENV_RC_PATH}',
+              f'echo "  export HOME" >> {DOCKERW_VENV_RC_PATH}',
+              f'echo "  exec su -p {DOCKERW_UNAME}" >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'fi\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo . {DOCKERW_VENV_RC_PATH} >> /home/{DOCKERW_UNAME}/.bashrc',
+              f'echo . {DOCKERW_VENV_RC_PATH} >> /root/.bashrc',
+              f'HOME=/home/{DOCKERW_UNAME}',
+              f'export HOME',
+              f'export > {DOCKERW_VENV_PATH}/env',
+              f'su -l {DOCKERW_UNAME} -c "cd $(pwd); $SHELL -ic \'export\'" 2> /dev/null 1>> {DOCKERW_VENV_PATH}/env',
+              f'sed -i \'s/declare -x/export/g\' {DOCKERW_VENV_PATH}/env',
+              f'# shellcheck disable=SC1091',
+              f'. {DOCKERW_VENV_PATH}/env',
+              f'ENV={DOCKERW_VENV_RC_PATH}',
+              f'export ENV',
+              f'run_user_cmd() {{',
+              f'  _IS_EXEC=$1; shift',
+              f'  _USERSPEC=$1; shift',
+              f'  _USERNAME=$1; shift',
+              f'  if $_IS_EXEC; then _EXEC="exec"; fi',
+              f'  if chroot --userspec="$_USERSPEC" --skip-chdir / id > /dev/null 2>&1; then',
+              f'    $_EXEC chroot --userspec="$_USERSPEC" --skip-chdir / "$@"',
+              f'  elif su -p "$_USERNAME" --session-command "id" > /dev/null 2>&1; then',
+              f'    $_EXEC su -p "$_USERNAME" --session-command "$*"',
+              f'  else',
+              f'    $_EXEC su -p "$_USERNAME" -c "$*"',
+              f'  fi',
+              f'}}', sep='\n', file=venv_file)
+        for dest_path in [ volume.split(':')[1] for volume in args if volume.startswith('--volume=') ]:
+            dest_path = pathlib.Path(dest_path)
+            if str(dest_path).startswith(str(DOCKERW_VENV_COPY_PATH)):
+                cp_cmd = f'cp -afT {dest_path} /{dest_path.relative_to(DOCKERW_VENV_COPY_PATH)}'
+                print(f'mkdir -p /{dest_path.relative_to(DOCKERW_VENV_COPY_PATH).parent}',
+                      f'if [ -r "{dest_path}" ]; then',
+                      f'  {cp_cmd}',
+                      f'else',
+                      f'  # shellcheck disable=SC2046',
+                      f'  run_user_cmd false $(stat -c \"%u:%g %U\" {dest_path}) {cp_cmd}',
+                      f'fi', sep='\n', file=venv_file)
         if len(parsed_image_cmd) == 1:
-            cmd = '$SHELL'
+            cmd = '"$SHELL"'
         elif '--' == parsed_image_cmd[1]:
-            cmd = ' '.join(parsed_image_cmd[2:]) if parsed_image_cmd[2:] != [] else '$SHELL'
+            cmd = ' '.join(parsed_image_cmd[2:]) if parsed_image_cmd[2:] != [] else '"$SHELL"'
         else:
             cmd = ' '.join(parsed_image_cmd[1:])
-        venv_file.write(f'EXEC=exec\nrun_user_cmd {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_UNAME} {cmd}\n')
+        print(f'run_user_cmd true {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_UNAME} {cmd}', file=venv_file)
         venv_file.close()
         args.append('--volume=/tmp/dockerw:/tmp/dockerw')
         parsed_image_cmd = [parsed_image_cmd[0], '--', venv_file.name]
-    return ['docker', 'run'] + args + parsed_image_cmd
+    os.execvpe('docker', ['docker', 'run'] + args + parsed_image_cmd, env=os.environ.copy())
 
 def _dockerw_help_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> None:
     print(_run_os_cmd('docker run --help').stdout.replace('docker run', 'dockerw'))
@@ -250,33 +361,45 @@ def _dockerw_dood_args(parsed_args: dict, parsed_image_cmd: list, post_args: dic
     return ['-v=/var/run/docker.sock:/var/run/docker.sock']
 
 def _dockerw_venv_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
-    return ['--user=root', '--entrypoint=sh', '-e=DOCKERW_VENV=1'] if 'user' not in parsed_args else []
+    return ['--user=root', '--entrypoint=sh', '-e=DOCKERW_VENV=1',
+            f'-e=ENV={DOCKERW_VENV_RC_PATH}'] if 'user' not in parsed_args else []
 
 def _dockerw_copy_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
     return [ f'-v {arg}' for arg in _update_volume_paths(parsed_args['dockerw_copy'], True) ]
 
-def _dockerw_load_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
-    if parsed_args['dockerw_load'] == '':
-        loads = [pathlib.Path.cwd(), *pathlib.Path.cwd().parents]
-    else:
-        loads = [pathlib.Path.cwd()]
-    for load in loads:
-        dockerw_defaults_file_path = load / pathlib.Path('.dockerw/defaults.py')
+def find_nearest_defaults_file_path() -> pathlib.Path:
+    for path in [pathlib.Path.cwd(), *pathlib.Path.cwd().parents]:
+        dockerw_defaults_file_path = path / pathlib.Path('.dockerw/defaults.py')
         if dockerw_defaults_file_path.exists() == True:
-            cfg = {'__file__': str(dockerw_defaults_file_path)}
-            exec(open(dockerw_defaults_file_path).read(), cfg)
-            return cfg.get('dockerw_defaults', [])
-    return []
+            return dockerw_defaults_file_path
+    return None
+
+def parse_defaults_file(defaults_file_path: pathlib.Path) -> dict:
+    if defaults_file_path and defaults_file_path.exists():
+        cfg = { '__file__': str(defaults_file_path) }
+        exec(open(cfg['__file__']).read(), cfg)
+        return cfg
+    return {}
+
+def _dockerw_load_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
+    defaults_file_path = pathlib.Path(parsed_args['dockerw_load'], '.dockerw/defaults.py')
+    return parse_defaults_file(defaults_file_path).get('dockerw_defaults', [])
+
+def get_volume_arg(src: str, dest_path: str='', is_copy: bool=False) -> str:
+    src_path = pathlib.PosixPath(re.sub(r'^~', pwd.getpwuid(DOCKERW_UID).pw_dir, src)).resolve()
+    if src_path.exists():
+        action = 'copy' if is_copy else 'volume'
+        dest_path = src if not dest_path else dest_path
+        return f'--{action} {src_path}:{dest_path}'
+    return ''
 
 def _dockerw_defaults_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
     defaults = ['-it --venv --x11 --rm --init --privileged --network host --security-opt seccomp=unconfined',
                 f'--dood --detach-keys=ctrl-q,ctrl-q --hostname {platform.node()} -e TERM=xterm-256color']
-    for action, paths in [('volume', ['~/.bash_history', '~/.vscode', '~/.emacs', '~/.emacs.d', '~/.vimrc']),
-                          ('copy',   ['~/.gitconfig', '~/.ssh'])]:
+    for is_copy, paths in [(False, ['~/.bash_history', '~/.vscode', '~/.emacs', '~/.emacs.d', '~/.vimrc']),
+                           (True,  ['~/.gitconfig', '~/.ssh'])]:
         for path in paths:
-            src_path = pathlib.PosixPath(re.sub(r'^~', pwd.getpwuid(DOCKERW_UID).pw_dir, path)).resolve()
-            if src_path.exists():
-                defaults.append(f'--{action} {src_path}:{path}')
+            defaults.append(get_volume_arg(path, is_copy=is_copy))
     if 'workdir' not in parsed_args:
         defaults.append('-w /app')
         defaults.append(f'-v {pathlib.Path.cwd()}:/app')
@@ -286,18 +409,18 @@ def _dockerw_print_defaults_args(parsed_args: dict, parsed_image_cmd: list, post
     post_args['dockerw_print_defaults'] = _dockerw_defaults_args(parsed_args, parsed_image_cmd, post_args)
     return []
 
+def _dockerw_prompt_banner_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
+    post_args['dockerw_prompt_banner'] = parsed_args['dockerw_prompt_banner']
+    return []
+
 def _dockerw_print_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
     post_args['dockerw_print'] = True
     return []
 
-def main() -> int:
-    docker_run_cmd = _parse_docker_run_args()
-    if docker_run_cmd:
-        os.execvpe(docker_run_cmd[0], docker_run_cmd, env=os.environ.copy())
-    else:
-        sys.argv[0] = 'docker'
-        os.execvpe(sys.argv[0], sys.argv, env=os.environ.copy())
-    return 1
+def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == 'run':
+        dockerw_run(sys.argv[2:])
+    os.execvpe('docker', sys.argv, env=os.environ.copy())
 
 if __name__ == '__main__':
-    exit(main())
+    main()
