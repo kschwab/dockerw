@@ -44,7 +44,7 @@ DOCKERW_UNAME = pwd.getpwuid(DOCKERW_UID).pw_name
 DOCKERW_VENV_PATH = pathlib.PosixPath(f'/.dockerw')
 DOCKERW_VENV_HOME_PATH = DOCKERW_VENV_PATH / f'home/{DOCKERW_UNAME}'
 DOCKERW_VENV_COPY_PATH = DOCKERW_VENV_PATH / 'copy'
-DOCKERW_VENV_RC_PATH   = DOCKERW_VENV_PATH / 'rc'
+DOCKERW_VENV_RC_PATH   = DOCKERW_VENV_PATH / 'rc.sh'
 
 def _run_os_cmd(cmd: str) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, universal_newlines=True)
@@ -266,8 +266,8 @@ def dockerw_run(args: list) -> None:
               fr"echo '    _mem_total'=\$\(awk -v mem_kb=\"\$_mem_total\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
               fr"echo '    _mem_avail'=\$\(awk -v mem_kb=\"\$_mem_avail\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
               fr"echo '    _mem'=\"\$_mem_used used, \$_mem_total total \(\$_mem_avail avail\)\" >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _disk_free'=\$\(df -H / \| awk \'FNR == 2 {{ print \$4 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _disk_used'=\$\(df -H / \| awk \'FNR == 2 {{ print \$3 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _disk_free'=\$\(df -h / \| awk \'FNR == 2 {{ print \$4 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '    _disk_used'=\$\(df -h / \| awk \'FNR == 2 {{ print \$3 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
               f'# shellcheck disable=SC2016',
               f'echo \'    echo "$DOCKERW_LOGIN_MESSAGE"\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'    echo \"$_g─────────────╴$_n\\`\-| $_g─────────────────$_n \\(,~~ $_g──────────────────────────────────────\"\' >> {DOCKERW_VENV_RC_PATH}',
