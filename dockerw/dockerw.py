@@ -2,8 +2,8 @@
 # Copyright (c) 2022-2023, Kyle Schwab
 # All rights reserved.
 
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# This source code is licensed under the BSD-style license found at
+# https://github.com/kschwab/dockerw/blob/main/LICENSE.md
 '''
 dockerw
 #######
@@ -33,8 +33,8 @@ __copyright__ = 'Copyright (c) 2022-2023, Kyle Schwab'
 __license__ = __copyright__ + '''
 All rights reserved.
 
-This source code is licensed under the BSD-style license found in the
-LICENSE file in the root directory of this source tree.'''
+This source code is licensed under the BSD-style license found at
+https://github.com/kschwab/dockerw/blob/main/LICENSE.md'''
 
 # @TODO
 # reverse volume
