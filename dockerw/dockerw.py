@@ -18,7 +18,7 @@ Docker run wrapper script.
 #  2. MINOR version when you add functionality in a backwards compatible manner
 #  3. PATCH version when you make backwards compatible bug fixes
 # Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
-__version__ = '0.7.12'
+__version__ = '0.7.13'
 __title__ = 'dockerw'
 __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
@@ -179,7 +179,12 @@ def dockerw_run(args: list) -> None:
         args.append(f'--env=DOCKERW_VENV_IMG="{parsed_image_cmd[0]}"')
         prompt_banner = post_args.get('dockerw_prompt_banner', parsed_image_cmd[0])
         args.append(f'--env=DOCKERW_LOGIN_MESSAGE={_login_message()}')
-        blue, green, normal, invert, jump = '\033[34m', '\033[32m', '\033[0m', '\033[7m', '\033[64G'
+        blue, green, normal, invert = '\033[34m', '\033[32m', '\033[0m', '\033[7m'
+        cpu_name = _run_os_cmd("grep -m 1 'model name[[:space:]]*:' /proc/cpuinfo | cut -d ' ' -f 3- | sed 's/(R)/®/g; s/(TM)/™/g;'").stdout
+        cpu_vcount = _run_os_cmd("grep -o 'processor[[:space:]]*:' /proc/cpuinfo | wc -l").stdout
+        cpu = f'{cpu_name.strip()} ({cpu_vcount.strip()} vCPU)'
+        fl = 51 # format length for middle column
+        cfl = fl + len(bytearray(cpu, sys.stdout.encoding)) - len(cpu) # cpu format length for middle column
         print(f'# shellcheck disable=SC2148',
               f'if [ -z "$SHELL" ]; then SHELL="$(command -v sh)"; export SHELL; fi',
               f'if [ "$(basename "$SHELL")" = "sh" ]; then',
@@ -254,9 +259,6 @@ def dockerw_run(args: list) -> None:
               fr"echo '    _weeks'=\$\(\(_days / 7\)\) >> {DOCKERW_VENV_RC_PATH}",
               fr"echo '    _days'=\$\(\(_days % 7\)\) >> {DOCKERW_VENV_RC_PATH}",
               fr"echo '    _uptime'=\"up \$_weeks weeks, \$_days days, \$_hours hours, \$_minutes minutes\" >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _cpu_name'=\$\(grep -m 1 \'model name[[:space:]]*:\' /proc/cpuinfo \| cut -d \' \' -f 3- \| sed \'s/\(R\)/®/g\; s/\(TM\)/™/g\;\'\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _cpu_vcount'=\$\(grep -io \'processor[[:space:]]*:\' /proc/cpuinfo \| wc -l\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _cpu'=\"\$_cpu_name \(\$_cpu_vcount vCPU\)\" >> {DOCKERW_VENV_RC_PATH}",
               fr"echo '    _mem_total'=\$\(grep \'MemTotal:\' /proc/meminfo \| awk \'{{ print \$2 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
               fr"echo '    _mem_avail'=\$\(grep \'MemAvailable:\' /proc/meminfo \| awk \'{{ print \$2 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
               fr"echo '    _mem_used'=\$\(\(_mem_total - _mem_avail\)\) >> {DOCKERW_VENV_RC_PATH}",
@@ -270,9 +272,9 @@ def dockerw_run(args: list) -> None:
               f'echo \'    echo "$DOCKERW_LOGIN_MESSAGE"\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'    echo \"$_g─────────────╴$_n\\`\-| $_g─────────────────$_n \\(,~~ $_g──────────────────────────────────────\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'    echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$_n \~| $_g━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\"\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'    printf \"┃$_n      CPU $_g┃$_n %-54.54s{jump} $_g┃$_n  DISK SPACE  $_g┃\\\\n\" \"$_cpu\"\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'    printf \"┃$_n      RAM $_g┃$_n %-51.51s $_g┃$_n free %7s $_g┃\\\\n\" \"$_mem\" \"$_disk_free\"\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'    printf \"┃$_n   UPTIME $_g┃$_n %-51.51s $_g┃$_n used %7s $_g┃$_n\\\\n\" \"$_uptime\" \"$_disk_used\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    printf \"┃$_n      CPU $_g┃$_n %-{cfl}.{cfl}s $_g┃$_n  DISK SPACE  $_g┃\\\\n\" \"{cpu}\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    printf \"┃$_n      RAM $_g┃$_n %-{fl}.{fl}s $_g┃$_n free %7s $_g┃\\\\n\" \"$_mem\" \"$_disk_free\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    printf \"┃$_n   UPTIME $_g┃$_n %-{fl}.{fl}s $_g┃$_n used %7s $_g┃$_n\\\\n\" \"$_uptime\" \"$_disk_used\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'    unset DOCKERW_LOGIN_MESSAGE\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'  fi\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'fi\' >> {DOCKERW_VENV_RC_PATH}',
