@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Copyright (c) 2022-2023, Kyle Schwab
+# All rights reserved.
+
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 '''
 dockerw
 #######
@@ -24,6 +29,19 @@ __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
 __summary__ = 'Docker run wrapper script. Provides a super-set of docker run capabilities.'
 __doc__ = __summary__
+__copyright__ = 'Copyright (c) 2022-2023, Kyle Schwab'
+__license__ = __copyright__ + '''
+All rights reserved.
+
+This source code is licensed under the BSD-style license found in the
+LICENSE file in the root directory of this source tree.
+'''
+
+# @TODO
+# reverse volume
+# print dump dockerw_entrypoint.sh
+# shellcheck test suite
+# documentation
 
 import argparse
 import copy
