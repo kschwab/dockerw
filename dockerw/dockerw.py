@@ -18,7 +18,7 @@ Docker run wrapper script.
 #  2. MINOR version when you add functionality in a backwards compatible manner
 #  3. PATCH version when you make backwards compatible bug fixes
 # Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
-__version__ = '0.7.13'
+__version__ = '0.7.14'
 __title__ = 'dockerw'
 __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
@@ -314,12 +314,11 @@ def dockerw_run(args: list) -> None:
             if str(dest_path).startswith(str(DOCKERW_VENV_COPY_PATH)):
                 cp_cmd = f'cp -afT {dest_path} /{dest_path.relative_to(DOCKERW_VENV_COPY_PATH)}'
                 print(f'mkdir -p /{dest_path.relative_to(DOCKERW_VENV_COPY_PATH).parent}',
-                      f'if [ -r "{dest_path}" ]; then',
-                      f'  {cp_cmd}',
-                      f'else',
-                      f'  # shellcheck disable=SC2046',
-                      f'  run_user_cmd false $(stat -c \"%u:%g %U\" {dest_path}) {cp_cmd}',
-                      f'fi', sep='\n', file=venv_file)
+                      f'if [ -d "{dest_path}" ]; then',
+                      f'  mkdir -p /{dest_path.relative_to(DOCKERW_VENV_COPY_PATH)}',
+                      f'  chown $(stat -c \"%u:%g\" {dest_path}) /{dest_path.relative_to(DOCKERW_VENV_COPY_PATH)}',
+                      f'fi',
+                      f'run_user_cmd false {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_UNAME} {cp_cmd}', sep='\n', file=venv_file)
         if len(parsed_image_cmd) == 1:
             cmd = '"$SHELL"'
         elif '--' == parsed_image_cmd[1]:
