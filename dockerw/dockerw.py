@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # Copyright (c) 2022-2023, Kyle Schwab
 # All rights reserved.
-
-# This source code is licensed under the BSD-style license found at
+#
+# This source code is licensed under the MIT license found at
 # https://github.com/kschwab/dockerw/blob/main/LICENSE.md
 '''
 dockerw
@@ -33,7 +33,7 @@ __copyright__ = 'Copyright (c) 2022-2023, Kyle Schwab'
 __license__ = __copyright__ + '''
 All rights reserved.
 
-This source code is licensed under the BSD-style license found at
+This source code is licensed under the MIT license found at
 https://github.com/kschwab/dockerw/blob/main/LICENSE.md'''
 
 # @TODO
