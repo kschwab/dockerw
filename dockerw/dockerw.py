@@ -23,7 +23,7 @@ Docker run wrapper script.
 #  2. MINOR version when you add functionality in a backwards compatible manner
 #  3. PATCH version when you make backwards compatible bug fixes
 # Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
-__version__ = '0.7.14'
+__version__ = '0.8.0'
 __title__ = 'dockerw'
 __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
@@ -35,12 +35,6 @@ All rights reserved.
 
 This source code is licensed under the MIT license found at
 https://github.com/kschwab/dockerw/blob/main/LICENSE.md'''
-
-# @TODO
-# reverse volume
-# print dump dockerw_entrypoint.sh
-# shellcheck test suite
-# documentation
 
 import argparse
 import copy
@@ -200,9 +194,9 @@ def dockerw_run(args: list) -> None:
         cpu_name = _run_os_cmd("grep -m 1 'model name[[:space:]]*:' /proc/cpuinfo | cut -d ' ' -f 3- | sed 's/(R)/®/g; s/(TM)/™/g;'").stdout
         cpu_vcount = _run_os_cmd("grep -o 'processor[[:space:]]*:' /proc/cpuinfo | wc -l").stdout
         cpu = f'{cpu_name.strip()} ({cpu_vcount.strip()} vCPU)'
-        fl = 51 # format length for middle column
+        fl = 53 # format length for middle column
         cfl = fl + len(bytearray(cpu, sys.stdout.encoding)) - len(cpu) # cpu format length for middle column
-        print(f'# shellcheck disable=SC2148',
+        print(f'# shellcheck disable=SC2148,SC2016',
               f'if [ -z "$SHELL" ]; then SHELL="$(command -v sh)"; export SHELL; fi',
               f'if [ "$(basename "$SHELL")" = "sh" ]; then',
               f'  if bash --help > /dev/null 2>&1; then SHELL="$(command -v bash)"; export SHELL; fi',
@@ -244,63 +238,72 @@ def dockerw_run(args: list) -> None:
               f'# shellcheck disable=SC2129',
               f'echo \'# shellcheck disable=SC2148\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo unset PROMPT_COMMAND >> {DOCKERW_VENV_RC_PATH}',
-              f'# shellcheck disable=SC2016',
               f'echo \'HOSTNAME="${{HOSTNAME:-{platform.node()}}}"\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'export HOSTNAME\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo _g=\"{green}\" >> {DOCKERW_VENV_RC_PATH}',
               f'echo _b=\"{blue}\" >> {DOCKERW_VENV_RC_PATH}',
               f'echo _i=\"{invert}\" >> {DOCKERW_VENV_RC_PATH}',
               f'echo _n=\"{normal}\" >> {DOCKERW_VENV_RC_PATH}',
-              f'# shellcheck disable=SC2016',
               f'echo \'_curr_shell=\"$(command -v "$0")\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'if readlink -f \"$_curr_shell\" > /dev/null 2>&1; then _curr_shell=\"$(readlink -f \"$_curr_shell\")\"; fi\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'case "$(basename "$_curr_shell\")" in\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'  dash|ksh)\' >> {DOCKERW_VENV_RC_PATH}',
-              f'# shellcheck disable=SC2028,SC2016',
               f'echo \'    _PS1_USER="$(whoami)"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'# shellcheck disable=SC2028',
               f'echo \'    PS1="$_i📦{prompt_banner}$_n\\n$_g$_PS1_USER@$HOSTNAME$_n $_b\\$PWD$_n\\n\\$ " ;;\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'  *)\' >> {DOCKERW_VENV_RC_PATH}',
-              f'# shellcheck disable=SC2028,SC2016',
+              f'# shellcheck disable=SC2028',
               f'echo \'    PS1="$_i📦{prompt_banner}$_n\\n$_g\\u@\\h$_n $_b\\w$_n\\n\\$ " ;;\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'esac\' >> {DOCKERW_VENV_RC_PATH}',
-              f'# shellcheck disable=SC2016,SC2129',
-              f'echo \'if [ "$*" = "$SHELL" ] || [ "$*" = "" ]; then\' >> {DOCKERW_VENV_RC_PATH}',
-              f'# shellcheck disable=SC2016',
-              f'echo \'  if [ -n "$DOCKERW_LOGIN_MESSAGE" ]; then\' >> {DOCKERW_VENV_RC_PATH}',
-              fr"echo '    _uptime'=\"\$\(awk \'{{ printf \"%d\", \$1 }}\' /proc/uptime\)\" >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _minutes'=\$\(\(_uptime / 60\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _hours'=\$\(\(_minutes / 60\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _minutes'=\$\(\(_minutes % 60\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _days'=\$\(\(_hours / 24\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _hours'=\$\(\(_hours % 24\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _weeks'=\$\(\(_days / 7\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _days'=\$\(\(_days % 7\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _uptime'=\"up \$_weeks weeks, \$_days days, \$_hours hours, \$_minutes minutes\" >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _mem_total'=\$\(grep \'MemTotal:\' /proc/meminfo \| awk \'{{ print \$2 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _mem_avail'=\$\(grep \'MemAvailable:\' /proc/meminfo \| awk \'{{ print \$2 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _mem_used'=\$\(\(_mem_total - _mem_avail\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _mem_used'=\$\(awk -v mem_kb=\"\$_mem_used\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _mem_total'=\$\(awk -v mem_kb=\"\$_mem_total\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _mem_avail'=\$\(awk -v mem_kb=\"\$_mem_avail\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _mem'=\"\$_mem_used used, \$_mem_total total \(\$_mem_avail avail\)\" >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _disk_free'=\$\(df -h / \| awk \'FNR == 2 {{ print \$4 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '    _disk_used'=\$\(df -h / \| awk \'FNR == 2 {{ print \$3 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
-              f'# shellcheck disable=SC2016',
-              f'echo \'    echo "$DOCKERW_LOGIN_MESSAGE"\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'    echo \"$_g─────────────╴$_n\\`\-| $_g─────────────────$_n \\(,~~ $_g──────────────────────────────────────\"\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'    echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$_n \~| $_g━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\"\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'    printf \"┃$_n      CPU $_g┃$_n %-{cfl}.{cfl}s $_g┃$_n  DISK SPACE  $_g┃\\\\n\" \"{cpu}\"\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'    printf \"┃$_n      RAM $_g┃$_n %-{fl}.{fl}s $_g┃$_n free %7s $_g┃\\\\n\" \"$_mem\" \"$_disk_free\"\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'    printf \"┃$_n   UPTIME $_g┃$_n %-{fl}.{fl}s $_g┃$_n used %7s $_g┃$_n\\\\n\" \"$_uptime\" \"$_disk_used\"\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'    unset DOCKERW_LOGIN_MESSAGE\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'  fi\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'fi\' >> {DOCKERW_VENV_RC_PATH}',
-              f'# shellcheck disable=SC2016',
+              f'# shellcheck disable=SC2129',
               f'echo \'if [ "$(id -u)" != "{DOCKERW_UID}" ] && [ "$SUDO_UID" != "{DOCKERW_UID}" ]; then\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo "  cd $PWD || exit" >> {DOCKERW_VENV_RC_PATH}',
               f'echo "  HOME=/home/{DOCKERW_UNAME}" >> {DOCKERW_VENV_RC_PATH}',
               f'echo "  export HOME" >> {DOCKERW_VENV_RC_PATH}',
-              f'echo "  exec su -p {DOCKERW_UNAME}" >> {DOCKERW_VENV_RC_PATH}',
+              f"echo '  if chroot --userspec={DOCKERW_UID}:{DOCKERW_GID} --skip-chdir / id > /dev/null 2>&1; then' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo '    exec chroot --userspec={DOCKERW_UID}:{DOCKERW_GID} --skip-chdir / \"$0\"' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo '  elif su -p {DOCKERW_UNAME} --session-command \"id\" > /dev/null 2>&1; then' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo '    exec su -p {DOCKERW_UNAME} --session-command \"$0\"' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo '  else' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo '    exec su -p {DOCKERW_UNAME} \"$0\"' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo '  fi' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo 'fi' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo 'if [ -n \"$DOCKERW_LOGIN_MESSAGE\" ]; then' >> {DOCKERW_VENV_RC_PATH}",
+              f'# shellcheck disable=SC1083',
+              fr"echo '  _uptime'=\"\$\(awk \'{{ printf \"%d\", \$1 }}\' /proc/uptime\)\" >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '  _minutes'=\$\(\(_uptime / 60\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '  _hours'=\$\(\(_minutes / 60\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '  _minutes'=\$\(\(_minutes % 60\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '  _days'=\$\(\(_hours / 24\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '  _hours'=\$\(\(_hours % 24\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '  _weeks'=\$\(\(_days / 7\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '  _days'=\$\(\(_days % 7\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '  _uptime'=\"up \$_weeks weeks, \$_days days, \$_hours hours, \$_minutes minutes\" >> {DOCKERW_VENV_RC_PATH}",
+              f'# shellcheck disable=SC1083',
+              fr"echo '  _mem_total'=\$\(grep \'MemTotal:\' /proc/meminfo \| awk \'{{ print \$2 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              f'# shellcheck disable=SC1083',
+              fr"echo '  _mem_avail'=\$\(grep \'MemAvailable:\' /proc/meminfo \| awk \'{{ print \$2 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '  _mem_used'=\$\(\(_mem_total - _mem_avail\)\) >> {DOCKERW_VENV_RC_PATH}",
+              f'# shellcheck disable=SC1083',
+              fr"echo '  _mem_used'=\$\(awk -v mem_kb=\"\$_mem_used\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              f'# shellcheck disable=SC1083',
+              fr"echo '  _mem_total'=\$\(awk -v mem_kb=\"\$_mem_total\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              f'# shellcheck disable=SC1083',
+              fr"echo '  _mem_avail'=\$\(awk -v mem_kb=\"\$_mem_avail\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '  _mem'=\"\$_mem_used used, \$_mem_total total \(\$_mem_avail avail\)\" >> {DOCKERW_VENV_RC_PATH}",
+              f'# shellcheck disable=SC1083',
+              fr"echo '  _disk_free'=\$\(df -h / \| awk \'FNR == 2 {{ print \$4 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              f'# shellcheck disable=SC1083',
+              fr"echo '  _disk_used'=\$\(df -h / \| awk \'FNR == 2 {{ print \$3 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              f'echo \'  echo "$DOCKERW_LOGIN_MESSAGE"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'  echo \"$_g─────────────╴$_n\\`\-| $_g─────────────────$_n \\(,~~ $_g─────────────────────────────────────\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'  echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$_n \~| $_g━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'# shellcheck disable=SC2028',
+              f'echo \'  printf \"┃$_n     CPU $_g┃$_n %-{cfl}.{cfl}s $_g┃$_n DISK SPACE $_g┃\\\\n\" \"{cpu}\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'# shellcheck disable=SC2028',
+              f'echo \'  printf \"┃$_n     RAM $_g┃$_n %-{fl}.{fl}s $_g┃$_n free %5s $_g┃\\\\n\" \"$_mem\" \"$_disk_free\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'# shellcheck disable=SC2028',
+              f'echo \'  printf \"┃$_n  UPTIME $_g┃$_n %-{fl}.{fl}s $_g┃$_n used %5s $_g┃$_n\\\\n\" \"$_uptime\" \"$_disk_used\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'fi\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo . {DOCKERW_VENV_RC_PATH} >> /home/{DOCKERW_UNAME}/.bashrc',
               f'echo . {DOCKERW_VENV_RC_PATH} >> /root/.bashrc',
@@ -333,6 +336,7 @@ def dockerw_run(args: list) -> None:
                 print(f'mkdir -p /{dest_path.relative_to(DOCKERW_VENV_COPY_PATH).parent}',
                       f'if [ -d "{dest_path}" ]; then',
                       f'  mkdir -p /{dest_path.relative_to(DOCKERW_VENV_COPY_PATH)}',
+                      f'  # shellcheck disable=SC2046',
                       f'  chown $(stat -c \"%u:%g\" {dest_path}) /{dest_path.relative_to(DOCKERW_VENV_COPY_PATH)}',
                       f'fi',
                       f'run_user_cmd false {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_UNAME} {cp_cmd}', sep='\n', file=venv_file)
