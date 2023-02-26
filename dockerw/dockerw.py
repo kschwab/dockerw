@@ -23,7 +23,7 @@ Docker run wrapper script.
 #  2. MINOR version when you add functionality in a backwards compatible manner
 #  3. PATCH version when you make backwards compatible bug fixes
 # Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
-__version__ = '0.8.0'
+__version__ = '0.9.0'
 __title__ = 'dockerw'
 __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
@@ -127,6 +127,8 @@ def dockerw_run(args: list) -> None:
     parser.add_argument('--defaults', dest='dockerw_defaults', action='store_true', default=None, help='Enable dockerw default args')
     parser.add_argument('--x11', dest='dockerw_x11', action='store_true', default=None, help='Enable x11 support if possible')
     parser.add_argument('--venv', dest='dockerw_venv', action='store_true', default=None, help='Enable user creation')
+    parser.add_argument('--login-shell', dest='dockerw_login_shell', action='store_true', default=None,
+                        help='Enable login shell for venv (venv must be enabled)')
     parser.add_argument('--dood', dest='dockerw_dood', action='store_true', default=None, help='Enable Docker-outside-of-Docker')
     parser.add_argument('--print', dest='dockerw_print', action='store_true', default=None, help='Print dockerw generated command')
     parser.add_argument('--print-defaults', dest='dockerw_print_defaults', action='store_true', default=None,
@@ -187,14 +189,14 @@ def dockerw_run(args: list) -> None:
         pathlib.Path('/tmp/dockerw').mkdir(parents=True, exist_ok=True)
         os.umask(oldmask)
         venv_file = tempfile.NamedTemporaryFile('w', dir='/tmp/dockerw', delete=False)
-        args.append(f'--env=DOCKERW_VENV_IMG="{parsed_image_cmd[0]}"')
+        args.append(f'--env=DOCKERW_VENV_IMG={parsed_image_cmd[0]}')
         prompt_banner = post_args.get('dockerw_prompt_banner', parsed_image_cmd[0])
         args.append(f'--env=DOCKERW_LOGIN_MESSAGE={_login_message()}')
         blue, green, normal, invert = '\033[34m', '\033[32m', '\033[0m', '\033[7m'
         cpu_name = _run_os_cmd("grep -m 1 'model name[[:space:]]*:' /proc/cpuinfo | cut -d ' ' -f 3- | sed 's/(R)/®/g; s/(TM)/™/g;'").stdout
         cpu_vcount = _run_os_cmd("grep -o 'processor[[:space:]]*:' /proc/cpuinfo | wc -l").stdout
         cpu = f'{cpu_name.strip()} ({cpu_vcount.strip()} vCPU)'
-        fl = 53 # format length for middle column
+        fl = 52 # format length for middle column
         cfl = fl + len(bytearray(cpu, sys.stdout.encoding)) - len(cpu) # cpu format length for middle column
         print(f'# shellcheck disable=SC2148,SC2016',
               f'if [ -z "$SHELL" ]; then SHELL="$(command -v sh)"; export SHELL; fi',
@@ -235,6 +237,7 @@ def dockerw_run(args: list) -> None:
               f'echo "{DOCKERW_UNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers',
               f'ln -s "$PWD" /home/{DOCKERW_UNAME}/workdir > /dev/null 2>&1',
               f'chown -h {DOCKERW_UID}:{DOCKERW_GID} /home/{DOCKERW_UNAME}/workdir > /dev/null 2>&1',
+              f'mkdir -p {DOCKERW_VENV_PATH}',
               f'# shellcheck disable=SC2129',
               f'echo \'# shellcheck disable=SC2148\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo unset PROMPT_COMMAND >> {DOCKERW_VENV_RC_PATH}',
@@ -250,10 +253,10 @@ def dockerw_run(args: list) -> None:
               f'echo \'  dash|ksh)\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'    _PS1_USER="$(whoami)"\' >> {DOCKERW_VENV_RC_PATH}',
               f'# shellcheck disable=SC2028',
-              f'echo \'    PS1="$_i📦{prompt_banner}$_n\\n$_g$_PS1_USER@$HOSTNAME$_n $_b\\$PWD$_n\\n\\$ " ;;\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    PS1="$_i📦{prompt_banner}$_n\\n$_g$_PS1_USER@$HOSTNAME$_n $_b\\$PWD$_n\\n\\\$ " ;;\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'  *)\' >> {DOCKERW_VENV_RC_PATH}',
               f'# shellcheck disable=SC2028',
-              f'echo \'    PS1="$_i📦{prompt_banner}$_n\\n$_g\\u@\\h$_n $_b\\w$_n\\n\\$ " ;;\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    PS1="$_i📦{prompt_banner}$_n\\n$_g\\u@\\h$_n $_b\\w$_n\\n\\\$ " ;;\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'esac\' >> {DOCKERW_VENV_RC_PATH}',
               f'# shellcheck disable=SC2129',
               f'echo \'if [ "$(id -u)" != "{DOCKERW_UID}" ] && [ "$SUDO_UID" != "{DOCKERW_UID}" ]; then\' >> {DOCKERW_VENV_RC_PATH}',
@@ -299,21 +302,16 @@ def dockerw_run(args: list) -> None:
               f'echo \'  echo \"$_g─────────────╴$_n\\`\-| $_g─────────────────$_n \\(,~~ $_g─────────────────────────────────────\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'  echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$_n \~| $_g━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'# shellcheck disable=SC2028',
-              f'echo \'  printf \"┃$_n     CPU $_g┃$_n %-{cfl}.{cfl}s $_g┃$_n DISK SPACE $_g┃\\\\n\" \"{cpu}\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'  printf \"┃$_n    CPU $_g┃$_n %-{cfl}.{cfl}s $_g┃$_n  DISK SPACE  $_g┃\\\\n\" \"{cpu}\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'# shellcheck disable=SC2028',
-              f'echo \'  printf \"┃$_n     RAM $_g┃$_n %-{fl}.{fl}s $_g┃$_n free %5s $_g┃\\\\n\" \"$_mem\" \"$_disk_free\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'  printf \"┃$_n    RAM $_g┃$_n %-{fl}.{fl}s $_g┃$_n free  %6s $_g┃\\\\n\" \"$_mem\" \"$_disk_free\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'# shellcheck disable=SC2028',
-              f'echo \'  printf \"┃$_n  UPTIME $_g┃$_n %-{fl}.{fl}s $_g┃$_n used %5s $_g┃$_n\\\\n\" \"$_uptime\" \"$_disk_used\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'  printf \"┃$_n UPTIME $_g┃$_n %-{fl}.{fl}s $_g┃$_n used  %6s $_g┃$_n\\\\n\" \"$_uptime\" \"$_disk_used\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'fi\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo . {DOCKERW_VENV_RC_PATH} >> /home/{DOCKERW_UNAME}/.bashrc',
               f'echo . {DOCKERW_VENV_RC_PATH} >> /root/.bashrc',
               f'HOME=/home/{DOCKERW_UNAME}',
               f'export HOME',
-              f'export > {DOCKERW_VENV_PATH}/env',
-              f'su -l {DOCKERW_UNAME} -c "cd $(pwd); $SHELL -ic \'export\'" 2> /dev/null 1>> {DOCKERW_VENV_PATH}/env',
-              f'sed -i \'s/declare -x/export/g\' {DOCKERW_VENV_PATH}/env',
-              f'# shellcheck disable=SC1091',
-              f'. {DOCKERW_VENV_PATH}/env',
               f'ENV={DOCKERW_VENV_RC_PATH}',
               f'export ENV',
               f'run_user_cmd() {{',
@@ -349,7 +347,8 @@ def dockerw_run(args: list) -> None:
         print(f'run_user_cmd true {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_UNAME} {cmd}', file=venv_file)
         venv_file.close()
         args.append('--volume=/tmp/dockerw:/tmp/dockerw')
-        parsed_image_cmd = [parsed_image_cmd[0], '--', venv_file.name]
+        parsed_image_cmd = [parsed_image_cmd[0]]
+        parsed_image_cmd += ['-l', venv_file.name] if post_args.get('dockerw_login_shell') else [venv_file.name]
     os.execvpe('docker', ['docker', 'run'] + args + parsed_image_cmd, env=os.environ.copy())
 
 def _dockerw_help_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> None:
@@ -385,6 +384,10 @@ def _dockerw_dood_args(parsed_args: dict, parsed_image_cmd: list, post_args: dic
 def _dockerw_venv_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
     return ['--user=root', '--entrypoint=sh', '-e=DOCKERW_VENV=1',
             f'-e=ENV={DOCKERW_VENV_RC_PATH}'] if 'user' not in parsed_args else []
+
+def _dockerw_login_shell_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
+    post_args['dockerw_login_shell'] = True
+    return []
 
 def _dockerw_copy_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
     return [ f'-v {arg}' for arg in _update_volume_paths(parsed_args['dockerw_copy'], True) ]
