@@ -23,7 +23,7 @@ Docker run wrapper script.
 #  2. MINOR version when you add functionality in a backwards compatible manner
 #  3. PATCH version when you make backwards compatible bug fixes
 # Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
-__version__ = '0.9.0'
+__version__ = '0.9.4'
 __title__ = 'dockerw'
 __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
@@ -60,25 +60,6 @@ DOCKERW_VENV_RC_PATH   = DOCKERW_VENV_PATH / 'rc.sh'
 def _run_os_cmd(cmd: str) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, universal_newlines=True)
 
-def _login_message() -> str:
-    return \
-fr"""                 ,,))))))));,
-              __)))))))))))))),
-   \|/       -\(((((''''((((((((.     .----------------------------.
-   -*-==//////((''  .     `)))))),   /  DOCKERW VENV _____________)
-   /|\      ))| o    ;-.    '(((((  /            _______________)   ,(,
-            ( `|    /  )    ;))))' /         _______________)    ,_))^;(~
-               |   |   |   ,))((((_/      ________) __          %,;(;(>';'~
-               o_);   ;    )))(((`    \ \   ~---~  `:: \       %%~~)(v;(`('~
-                     ;    ''''````         `:       `:: |\,__,%%    );`'; ~ %
-                    |   _                )     /      `:|`----'     `-'
-              ______/\/~    |                 /        /
-            /~;;.____/;;'  /          ___--,-(   `;;;/
-           / //  _;______;'------~~~~~    /;;/\    /
-          //  | |                        / ;   \;;,\
-         (<_  | ;                      /',/-----'  _>
-          \_| ||_                     //~;~~~~~~~~~"""
-
 def _update_volume_paths(volumes: list, is_copy: bool=False) -> list:
     for volume in range(len(volumes)):
         src_path, dest_path, options = (volumes[volume].split(':') + [''])[:3]
@@ -95,6 +76,12 @@ def _update_volume_paths(volumes: list, is_copy: bool=False) -> list:
             dest_path = dest_path.replace(f'/home/{DOCKERW_UNAME}', f'{DOCKERW_VENV_HOME_PATH}', 1)
         volumes[volume] = f'{src_path}:{dest_path}{":" + options if options else ""}'
     return volumes
+
+def _parse_image_name(image_name: str) -> tuple:
+    image_name = re.match('^((?P<registry>([^/]*[\.:]|localhost)[^/]*)/)?/?(?P<name>[^:]*):?(?P<tag>.*)', image_name).groupdict()
+    return (image_name['registry'] if image_name['registry'] else 'docker.io',
+            image_name['name'],
+            image_name['tag'] if image_name['tag'] else 'latest')
 
 def _parse(parser: argparse.ArgumentParser, args: dict) -> tuple:
     parsed_args, image_cmd = parser.parse_known_args(shlex.split(' '.join(args if args != None else [])))
@@ -178,6 +165,8 @@ def dockerw_run(args: list) -> None:
             args += parsed_image_cmd
             continue
         break
+    image_repo, image_name, image_tag = _parse_image_name(parsed_image_cmd[0])
+    parsed_image_cmd[0] = f'{image_repo}/{image_name}:{image_tag}'
     if 'dockerw_print' in post_args:
         print(' '.join(['docker', 'run'] + args + parsed_image_cmd))
         exit(0)
@@ -190,8 +179,10 @@ def dockerw_run(args: list) -> None:
         os.umask(oldmask)
         venv_file = tempfile.NamedTemporaryFile('w', dir='/tmp/dockerw', delete=False)
         args.append(f'--env=DOCKERW_VENV_IMG={parsed_image_cmd[0]}')
+        args.append(f'--env=DOCKERW_VENV_IMG_REPO={image_repo}')
+        args.append(f'--env=DOCKERW_VENV_IMG_NAME={image_name}')
+        args.append(f'--env=DOCKERW_VENV_IMG_TAG={image_tag}')
         prompt_banner = post_args.get('dockerw_prompt_banner', parsed_image_cmd[0])
-        args.append(f'--env=DOCKERW_LOGIN_MESSAGE={_login_message()}')
         blue, green, normal, invert = '\033[34m', '\033[32m', '\033[0m', '\033[7m'
         cpu_name = _run_os_cmd("grep -m 1 'model name[[:space:]]*:' /proc/cpuinfo | cut -d ' ' -f 3- | sed 's/(R)/®/g; s/(TM)/™/g;'").stdout
         cpu_vcount = _run_os_cmd("grep -o 'processor[[:space:]]*:' /proc/cpuinfo | wc -l").stdout
@@ -205,14 +196,14 @@ def dockerw_run(args: list) -> None:
               f'fi',
               f'mkdir -p {DOCKERW_VENV_HOME_PATH}',
               f'mv {venv_file.name} {DOCKERW_VENV_HOME_PATH}/.dockerw_entrypoint.sh',
-              f'EXISTING_USER=$(awk -v uid={DOCKERW_UID} -F":" \'{{ if($3==uid){{print $1}} }}\' /etc/passwd 2>/dev/null)',
-              f'if [ -n "$EXISTING_USER" ]; then',
+              f'_existing_user=$(awk -v uid={DOCKERW_UID} -F":" \'{{ if($3==uid){{print $1}} }}\' /etc/passwd 2>/dev/null)',
+              f'if [ -n "$_existing_user" ]; then',
               f'  if userdel --help > /dev/null 2>&1; then',
-              f'    userdel "$EXISTING_USER" > /dev/null 2>&1',
+              f'    userdel "$_existing_user" > /dev/null 2>&1',
               f'  else',
-              f'    deluser "$EXISTING_USER" > /dev/null 2>&1',
+              f'    deluser "$_existing_user" > /dev/null 2>&1',
               f'  fi',
-              f'  mv /home/"$EXISTING_USER" /home/_venv_orig_user_"$EXISTING_USER"',
+              f'  mv /home/"$_existing_user" /home/_venv_orig_user_"$_existing_user"',
               f'fi',
               f'if groupadd --help > /dev/null 2>&1; then',
               f'  groupadd -g {DOCKERW_GID} {DOCKERW_UNAME} > /dev/null 2>&1',
@@ -251,9 +242,9 @@ def dockerw_run(args: list) -> None:
               f'echo \'if readlink -f \"$_curr_shell\" > /dev/null 2>&1; then _curr_shell=\"$(readlink -f \"$_curr_shell\")\"; fi\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'case "$(basename "$_curr_shell\")" in\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'  dash|ksh)\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'    _PS1_USER="$(whoami)"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    _ps1_user="$(whoami)"\' >> {DOCKERW_VENV_RC_PATH}',
               f'# shellcheck disable=SC2028',
-              f'echo \'    PS1="$_i📦{prompt_banner}$_n\\n$_g$_PS1_USER@$HOSTNAME$_n $_b\\$PWD$_n\\n\\\$ " ;;\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'    PS1="$_i📦{prompt_banner}$_n\\n$_g$_ps1_user@$HOSTNAME$_n $_b\\$PWD$_n\\n\\\$ " ;;\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'  *)\' >> {DOCKERW_VENV_RC_PATH}',
               f'# shellcheck disable=SC2028',
               f'echo \'    PS1="$_i📦{prompt_banner}$_n\\n$_g\\u@\\h$_n $_b\\w$_n\\n\\\$ " ;;\' >> {DOCKERW_VENV_RC_PATH}',
@@ -271,43 +262,64 @@ def dockerw_run(args: list) -> None:
               f"echo '    exec su -p {DOCKERW_UNAME} \"$0\"' >> {DOCKERW_VENV_RC_PATH}",
               f"echo '  fi' >> {DOCKERW_VENV_RC_PATH}",
               f"echo 'fi' >> {DOCKERW_VENV_RC_PATH}",
-              f"echo 'if [ -n \"$DOCKERW_LOGIN_MESSAGE\" ]; then' >> {DOCKERW_VENV_RC_PATH}",
               f'# shellcheck disable=SC1083',
-              fr"echo '  _uptime'=\"\$\(awk \'{{ printf \"%d\", \$1 }}\' /proc/uptime\)\" >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '  _minutes'=\$\(\(_uptime / 60\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '  _hours'=\$\(\(_minutes / 60\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '  _minutes'=\$\(\(_minutes % 60\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '  _days'=\$\(\(_hours / 24\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '  _hours'=\$\(\(_hours % 24\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '  _weeks'=\$\(\(_days / 7\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '  _days'=\$\(\(_days % 7\)\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '  _uptime'=\"up \$_weeks weeks, \$_days days, \$_hours hours, \$_minutes minutes\" >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_uptime'=\"\$\(awk \'{{ printf \"%d\", \$1 }}\' /proc/uptime\)\" >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_minutes'=\$\(\(_uptime / 60\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_hours'=\$\(\(_minutes / 60\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_minutes'=\$\(\(_minutes % 60\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_days'=\$\(\(_hours / 24\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_hours'=\$\(\(_hours % 24\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_weeks'=\$\(\(_days / 7\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_days'=\$\(\(_days % 7\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_uptime'=\"up \$_weeks weeks, \$_days days, \$_hours hours, \$_minutes minutes\" >> {DOCKERW_VENV_RC_PATH}",
               f'# shellcheck disable=SC1083',
-              fr"echo '  _mem_total'=\$\(grep \'MemTotal:\' /proc/meminfo \| awk \'{{ print \$2 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_mem_total'=\$\(grep \'MemTotal:\' /proc/meminfo \| awk \'{{ print \$2 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
               f'# shellcheck disable=SC1083',
-              fr"echo '  _mem_avail'=\$\(grep \'MemAvailable:\' /proc/meminfo \| awk \'{{ print \$2 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '  _mem_used'=\$\(\(_mem_total - _mem_avail\)\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_mem_avail'=\$\(grep \'MemAvailable:\' /proc/meminfo \| awk \'{{ print \$2 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_mem_used'=\$\(\(_mem_total - _mem_avail\)\) >> {DOCKERW_VENV_RC_PATH}",
               f'# shellcheck disable=SC1083',
-              fr"echo '  _mem_used'=\$\(awk -v mem_kb=\"\$_mem_used\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_mem_used'=\$\(awk -v mem_kb=\"\$_mem_used\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
               f'# shellcheck disable=SC1083',
-              fr"echo '  _mem_total'=\$\(awk -v mem_kb=\"\$_mem_total\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_mem_total'=\$\(awk -v mem_kb=\"\$_mem_total\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
               f'# shellcheck disable=SC1083',
-              fr"echo '  _mem_avail'=\$\(awk -v mem_kb=\"\$_mem_avail\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"echo '  _mem'=\"\$_mem_used used, \$_mem_total total \(\$_mem_avail avail\)\" >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_mem_avail'=\$\(awk -v mem_kb=\"\$_mem_avail\" \'BEGIN{{ printf \"%.1fG\", mem_kb / 1000000}}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_mem'=\"\$_mem_used used, \$_mem_total total \(\$_mem_avail avail\)\" >> {DOCKERW_VENV_RC_PATH}",
               f'# shellcheck disable=SC1083',
-              fr"echo '  _disk_free'=\$\(df -h / \| awk \'FNR == 2 {{ print \$4 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"echo '_disk_free'=\$\(df -h / \| awk \'FNR == 2 {{ print \$4 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
               f'# shellcheck disable=SC1083',
-              fr"echo '  _disk_used'=\$\(df -h / \| awk \'FNR == 2 {{ print \$3 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
-              f'echo \'  echo "$DOCKERW_LOGIN_MESSAGE"\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'  echo \"$_g─────────────╴$_n\\`\-| $_g─────────────────$_n \\(,~~ $_g─────────────────────────────────────\"\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'  echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$_n \~| $_g━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\"\' >> {DOCKERW_VENV_RC_PATH}',
+              fr"echo '_disk_used'=\$\(df -h / \| awk \'FNR == 2 {{ print \$3 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
+              fr"""_login_banner=$(cat << "EOF"
+                 ,,))))))));,
+              __)))))))))))))),
+   \|/       -\(((((''''((((((((.     .----------------------------.
+   -*-==//////((''  .     `)))))),   /  DOCKERW VENV _____________)
+   /|\      ))| o    ;-.    '(((((  /            _______________)   ,(,
+            ( `|    /  )    ;))))' /         _______________)    ,_))^;(~
+               |   |   |   ,))((((_/      ________) __          %,;(;(>';'~
+               o_);   ;    )))(((`    \ \   ~---~  `:: \       %%~~)(v;(`('~
+                     ;    ''''````         `:       `:: |\,__,%%    );`'; ~ %
+                    |   _                )     /      `:|`----'     `-'
+              ______/\/~    |                 /        /
+            /~;;.____/;;'  /          ___--,-(   `;;;/
+           / //  _;______;'------~~~~~    /;;/\    /
+          //  | |                        / ;   \;;,\
+         (<_  | ;                      /',/-----'  _>
+          \_| ||_                     //~;~~~~~~~~~""",
+              f'EOF',
+              f')',
+              f'# shellcheck disable=SC2129',
+              f'echo \'cat << "EOF"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo "$_login_banner" >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'EOF\' >> {DOCKERW_VENV_RC_PATH}',
+              f'# shellcheck disable=SC2129',
+              f'echo \'echo \"$_g─────────────╴$_n\\`\-| $_g─────────────────$_n \\(,~~ $_g─────────────────────────────────────\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$_n \~| $_g━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'# shellcheck disable=SC2028',
-              f'echo \'  printf \"┃$_n    CPU $_g┃$_n %-{cfl}.{cfl}s $_g┃$_n  DISK SPACE  $_g┃\\\\n\" \"{cpu}\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'printf \"┃$_n    CPU $_g┃$_n %-{cfl}.{cfl}s $_g┃$_n  DISK SPACE  $_g┃\\\\n\" \"{cpu}\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'# shellcheck disable=SC2028',
-              f'echo \'  printf \"┃$_n    RAM $_g┃$_n %-{fl}.{fl}s $_g┃$_n free  %6s $_g┃\\\\n\" \"$_mem\" \"$_disk_free\"\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'printf \"┃$_n    RAM $_g┃$_n %-{fl}.{fl}s $_g┃$_n free  %6s $_g┃\\\\n\" \"$_mem\" \"$_disk_free\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'# shellcheck disable=SC2028',
-              f'echo \'  printf \"┃$_n UPTIME $_g┃$_n %-{fl}.{fl}s $_g┃$_n used  %6s $_g┃$_n\\\\n\" \"$_uptime\" \"$_disk_used\"\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'fi\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'printf \"┃$_n UPTIME $_g┃$_n %-{fl}.{fl}s $_g┃$_n used  %6s $_g┃$_n\\\\n\" \"$_uptime\" \"$_disk_used\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo . {DOCKERW_VENV_RC_PATH} >> /home/{DOCKERW_UNAME}/.bashrc',
               f'echo . {DOCKERW_VENV_RC_PATH} >> /root/.bashrc',
               f'HOME=/home/{DOCKERW_UNAME}',
@@ -315,16 +327,16 @@ def dockerw_run(args: list) -> None:
               f'ENV={DOCKERW_VENV_RC_PATH}',
               f'export ENV',
               f'run_user_cmd() {{',
-              f'  _IS_EXEC=$1; shift',
-              f'  _USERSPEC=$1; shift',
-              f'  _USERNAME=$1; shift',
-              f'  if $_IS_EXEC; then _EXEC="exec"; fi',
-              f'  if chroot --userspec="$_USERSPEC" --skip-chdir / id > /dev/null 2>&1; then',
-              f'    $_EXEC chroot --userspec="$_USERSPEC" --skip-chdir / "$@"',
-              f'  elif su -p "$_USERNAME" --session-command "id" > /dev/null 2>&1; then',
-              f'    $_EXEC su -p "$_USERNAME" --session-command "$*"',
+              f'  _is_exec=$1; shift',
+              f'  _userspec=$1; shift',
+              f'  _username=$1; shift',
+              f'  if $_is_exec; then _exec="exec"; fi',
+              f'  if chroot --userspec="$_userspec" --skip-chdir / id > /dev/null 2>&1; then',
+              f'    $_exec chroot --userspec="$_userspec" --skip-chdir / "$@"',
+              f'  elif su -p "$_username" --session-command "id" > /dev/null 2>&1; then',
+              f'    $_exec su -p "$_username" --session-command "$*"',
               f'  else',
-              f'    $_EXEC su -p "$_USERNAME" -c "$*"',
+              f'    $_exec su -p "$_username" -c "$*"',
               f'  fi',
               f'}}', sep='\n', file=venv_file)
         for dest_path in [ volume.split(':')[1] for volume in args if volume.startswith('--volume=') ]:
