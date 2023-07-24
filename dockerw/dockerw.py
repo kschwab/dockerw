@@ -23,7 +23,7 @@ Docker run wrapper script.
 #  2. MINOR version when you add functionality in a backwards compatible manner
 #  3. PATCH version when you make backwards compatible bug fixes
 # Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
-__version__ = '0.9.4'
+__version__ = '1.0.0'
 __title__ = 'dockerw'
 __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
@@ -48,6 +48,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from importlib.machinery import SourceFileLoader
 
 DOCKERW_UID = int(os.environ.get("SUDO_UID", os.getuid()))
 DOCKERW_GID = int(os.environ.get("SUDO_GID", os.getgid()))
@@ -56,6 +57,94 @@ DOCKERW_VENV_PATH = pathlib.PosixPath(f'/.dockerw')
 DOCKERW_VENV_HOME_PATH = DOCKERW_VENV_PATH / f'home/{DOCKERW_UNAME}'
 DOCKERW_VENV_COPY_PATH = DOCKERW_VENV_PATH / 'copy'
 DOCKERW_VENV_RC_PATH   = DOCKERW_VENV_PATH / 'rc.sh'
+DOCKERW_VENV_SHELLS = ('sh', 'bash', 'dash', 'ksh', 'ash')
+
+class _DockerwParser(argparse.ArgumentParser):
+    _dockerw_args = set()
+
+    def __init__(self, *args, add_help: bool=False, **kwargs):
+        super(_DockerwParser, self).__init__(*args, add_help=add_help, **kwargs)
+
+    def add_argument(self, *args, is_dockerw_arg: bool=True, **kwargs):
+        action = super(_DockerwParser, self).add_argument(*args, **kwargs)
+        if is_dockerw_arg:
+            _DockerwParser._dockerw_args.add(action.dest)
+
+    @staticmethod
+    def is_dockerw_arg(arg: str):
+        return arg in _DockerwParser._dockerw_args
+
+class _DefaultsAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        _VenvAction(option_string, None).__call__(parser, namespace, values, option_string)
+        _DoodAction(option_string, None).__call__(parser, namespace, values, option_string)
+        _X11Action(option_string, None).__call__(parser, namespace, values, option_string)
+        namespace.defaults = True
+        namespace.interactive = True
+        namespace.tty = True
+        namespace.rm = True
+        namespace.init = True
+        namespace.privileged = True
+        namespace.network = 'host'
+        namespace.security_opt = 'seccomp=unconfined'
+        namespace.detach_keys = 'ctrl-q,ctrl-q'
+        namespace.hostname = f'{platform.node()}'
+        namespace.workdir = '/app'
+        namespace.volume.append(f'{pathlib.Path.cwd()}:/app')
+        namespace.env.append('TERM=xterm-256color')
+        for is_copy, paths in [(False, ['~/.bash_history', '~/.vscode', '~/.emacs', '~/.emacs.d', '~/.vimrc']),
+                               (True,  ['~/.gitconfig', '~/.ssh'])]:
+            for path in paths:
+                src_path = pathlib.PosixPath(re.sub(r'^~', pwd.getpwuid(DOCKERW_UID).pw_dir, path)).resolve()
+                if src_path.exists():
+                    namespace.volume += _update_volume_paths([f'{path}:{path}'], is_copy)
+
+class _InfoAction(argparse.Action):
+    def __call__(self, parser, _namespace=None, _values=None, option_string=None):
+        if option_string == '--help':
+            dockerw_options = parser.format_help().split('optional arguments:')[-1].lstrip('\n')
+            print(f"{_run_os_cmd('docker run --help').stdout.replace('docker run', 'dockerw run')}")
+            print(f"Dockerw Options:\n{dockerw_options}")
+            exit(0)
+        else:
+            print(_run_os_cmd('docker --version').stdout.rstrip())
+            print('Dockerw version', __version__)
+            exit(0)
+
+class _UserAction(argparse.Action):
+    def __call__(self, _parser, namespace, values, _option_string=None):
+        if not namespace.venv:
+            namespace.user = values[0]
+
+class _VenvAction(argparse.Action):
+    def __call__(self, _parser, namespace, _values, _option_string=None):
+        namespace.venv = True
+        namespace.user = 'root'
+        namespace.entrypoint = 'sh'
+        namespace.env.append('DOCKERW_VENV=1')
+        namespace.env.append(f'ENV={DOCKERW_VENV_RC_PATH}')
+
+class _X11Action(argparse.Action):
+    def __call__(self, _parser, namespace, _values, _option_string=None):
+        if os.geteuid() != 0:
+            result = _run_os_cmd('xauth info | grep "Authority file" | awk \'{ print $3 }\'')
+        else:
+            result = _run_os_cmd(f'su {DOCKERW_UNAME} -c "xauth info" | grep "Authority file" | awk \'{{ print $3 }}\'')
+        if result.returncode == 0 and pathlib.PosixPath('/tmp/.X11-unix').exists():
+            namespace.x11 = True
+            namespace.env.append('DISPLAY')
+            namespace.volume.append('/tmp/.X11-unix:/tmp/.X11-unix:ro')
+            namespace.volume.append(f'{result.stdout.strip()}:~/.Xauthority:ro')
+
+class _DoodAction(argparse.Action):
+    def __call__(self, _parser, namespace, _values, _option_string=None):
+        namespace.dood = True
+        namespace.volume.append('/var/run/docker.sock:/var/run/docker.sock')
+
+class _CopyAction(argparse.Action):
+    def __call__(self, _parser, namespace, values, _option_string=None):
+        for arg in _update_volume_paths(values, True):
+            namespace.volume.append(arg)
 
 def _run_os_cmd(cmd: str) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, universal_newlines=True)
@@ -78,118 +167,217 @@ def _update_volume_paths(volumes: list, is_copy: bool=False) -> list:
     return volumes
 
 def _parse_image_name(image_name: str) -> tuple:
-    image_name = re.match('^((?P<registry>([^/]*[\.:]|localhost)[^/]*)/)?/?(?P<name>[^:]*):?(?P<tag>.*)', image_name).groupdict()
+    try:
+        image_name = \
+            re.match('^((?P<registry>([^/]*[\.:]|localhost)[^/]*)/)?/?(?P<name>[a-z0-9][^:]*):?(?P<tag>.*)', image_name).groupdict()
+    except:
+        exit(f'Error: Invalid image name provided: "{image_name}"')
     return (image_name['registry'] if image_name['registry'] else 'docker.io',
             image_name['name'],
             image_name['tag'] if image_name['tag'] else 'latest')
 
-def _parse(parser: argparse.ArgumentParser, args: dict) -> tuple:
-    parsed_args, image_cmd = parser.parse_known_args(shlex.split(' '.join(args if args != None else [])))
-    parsed_args = vars(parsed_args)
-    return { arg: parsed_args[arg] for arg in parsed_args if parsed_args[arg] not in [None, False] }, image_cmd
-
-def _merge_parsed_args(parsed_args: dict, new_args: dict) -> None:
-    for new_arg in new_args:
-        if new_arg in parsed_args:
-            if isinstance(parsed_args[new_arg], list):
-                parsed_args[new_arg] = list(set(parsed_args[new_arg] + new_args[new_arg]))
-        else:
-            parsed_args[new_arg] = new_args[new_arg]
-
-def dockerw_run(args: list) -> None:
-    try:
-        load_path = re.search(r'--load\s*=?\s*([^\s]+)', ' '.join(args)).group(1)
-        os.chdir(pathlib.Path(re.sub(r'^~', pwd.getpwuid(DOCKERW_UID).pw_dir, load_path)).resolve())
-    except FileNotFoundError:
-        exit(f'Error: Load path does not exist: {load_path}')
-    except AttributeError:
-        defaults_file_path = find_nearest_defaults_file_path()
-        if defaults_file_path:
-            args.insert(0, f'--load={defaults_file_path.parent.parent}')
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument('--help', dest='dockerw_help', action='store_const', const=parser, default=None, help=argparse.SUPPRESS)
-    parser.add_argument('--version', dest='dockerw_version', action='store_true', default=None, help=argparse.SUPPRESS)
-    parser.add_argument('--load', dest='dockerw_load', metavar='string', help='Load dockerw project')
-    parser.add_argument('--image-default', dest='dockerw_image_default', metavar='string', help='Default image if not specified')
-    parser.add_argument('--defaults', dest='dockerw_defaults', action='store_true', default=None, help='Enable dockerw default args')
-    parser.add_argument('--x11', dest='dockerw_x11', action='store_true', default=None, help='Enable x11 support if possible')
-    parser.add_argument('--venv', dest='dockerw_venv', action='store_true', default=None, help='Enable user creation')
-    parser.add_argument('--login-shell', dest='dockerw_login_shell', action='store_true', default=None,
-                        help='Enable login shell for venv (venv must be enabled)')
-    parser.add_argument('--dood', dest='dockerw_dood', action='store_true', default=None, help='Enable Docker-outside-of-Docker')
-    parser.add_argument('--print', dest='dockerw_print', action='store_true', default=None, help='Print dockerw generated command')
-    parser.add_argument('--print-defaults', dest='dockerw_print_defaults', action='store_true', default=None,
-                        help='Print dockerw args generated by "--defaults" flag')
-    parser.add_argument('--copy', dest='dockerw_copy', metavar='list', action='append',
-                        help='Bind mount and copy a volume (venv must be enabled)')
-    parser.add_argument('--prompt-banner', dest='dockerw_prompt_banner', default=None,
-                        help='CLI prompt banner to display. Default is docker image name (venv must be enabled)')
-    dockerw_long_flags = [ f'--{arg.replace("dockerw_","").replace("_","-")}' for arg in vars(parser.parse_args([])).keys() ]
-    for line in _run_os_cmd('docker run --help').stdout.splitlines():
-        matched = re.match(r'\s*(?P<short>-\w)?,?\s*(?P<long>--[^\s]+)\s+(?P<val_type>[^\s]+)?\s{4,}(?P<help>\w+.*)', line)
-        if matched:
-            arg = matched.groupdict()
-            if arg["long"] not in dockerw_long_flags:
-                flags = (arg['short'], arg['long']) if arg['short'] else (arg['long'],)
-                if arg['val_type'] == 'list':
-                    parser.add_argument(*flags, action='append', help=argparse.SUPPRESS)
-                elif arg['val_type']:
-                    parser.add_argument(*flags, nargs=1, help=argparse.SUPPRESS)
-                else:
-                    parser.add_argument(*flags, action='store_true', default=False, help=argparse.SUPPRESS)
-    post_args = {}
-    while True:
-        parsed_args, parsed_image_cmd = _parse(parser, args)
-        parsed_dockerw_args = [ arg_name for arg_name in parsed_args if arg_name.startswith('dockerw') ]
-        if parsed_dockerw_args:
-            for arg_name in parsed_dockerw_args:
-                new_args, new_image_cmd = _parse(parser, eval(f'_{arg_name}_args(parsed_args, parsed_image_cmd, post_args)'))
-                assert new_image_cmd == [], 'Parsed dockerw arg created new image command'
-                parsed_args.pop(arg_name)
-                _merge_parsed_args(parsed_args, new_args)
-        args = []
-        is_dockerw_flag_found = False
-        for arg_name in parsed_args:
-            arg_value = parsed_args[arg_name]
-            is_dockerw_flag_found = arg_name.startswith('dockerw') or is_dockerw_flag_found
-            arg_name = arg_name.replace("dockerw_","")
+def _parsed_args_to_list(parsed_args: argparse.Namespace) -> list:
+    parsed_args_list = []
+    parsed_args_dict = vars(parsed_args)
+    for arg_name in parsed_args_dict.keys():
+        if _DockerwParser.is_dockerw_arg(arg_name):
+            continue
+        arg_value = parsed_args_dict[arg_name]
+        if arg_value not in [None, False, []]:
             if isinstance(arg_value, str):
-                args.append(f'--{arg_name.replace("_","-")}={arg_value}')
+                parsed_args_list.append(f'--{arg_name.replace("_","-")}={arg_value}')
             elif isinstance(arg_value, list):
                 if arg_name == 'volume':
-                    _update_volume_paths(arg_value)
-                args += [ f'--{arg_name.replace("_","-")}={val}' for val in arg_value ]
+                    arg_value = _update_volume_paths(arg_value)
+                parsed_args_list += list(set([ f'--{arg_name.replace("_","-")}={val}' for val in arg_value ]))
             else:
-                args.append(f'--{arg_name.replace("_","-")}')
-        if is_dockerw_flag_found:
-            args += parsed_image_cmd
-            continue
-        break
-    image_repo, image_name, image_tag = _parse_image_name(parsed_image_cmd[0])
-    parsed_image_cmd[0] = f'{image_repo}/{image_name}:{image_tag}'
-    if 'dockerw_print' in post_args:
-        print(' '.join(['docker', 'run'] + args + parsed_image_cmd))
+                parsed_args_list.append(f'--{arg_name.replace("_","-")}')
+    if hasattr(parsed_args, 'image') and parsed_args.image != ['']:
+        parsed_args_list += parsed_args.image
+    return parsed_args_list
+
+def _shlex_join(arg_list) -> str:
+    # This is a python 3.6 workaround for shlex.join (added in python 3.8)
+    return ' '.join([shlex.quote(arg) for arg in arg_list])
+
+def _add_docker_args(parser: argparse.ArgumentParser, docker_cmd: str, ignore_args: list=[]) -> list:
+    for line in _run_os_cmd(f'docker {docker_cmd} --help').stdout.splitlines():
+        matched = re.match(r'\s*(?P<short>-\w)?,?\s*(?P<long>--[^\s]+)\s+(?P<val_type>[^\s]+)?\s{2,}(?P<help>\w+.*)', line)
+        if matched:
+            arg = matched.groupdict()
+            flags = (arg['short'], arg['long']) if arg['short'] else (arg['long'],)
+            if arg['long'] not in ignore_args:
+                if arg['val_type'] == 'list':
+                    parser.add_argument(*flags, action='append', default=[], help=argparse.SUPPRESS, is_dockerw_arg=False)
+                elif arg['val_type']:
+                    parser.add_argument(*flags, type=str, help=argparse.SUPPRESS, is_dockerw_arg=False)
+                else:
+                    parser.add_argument(*flags, action='store_true', default=False, help=argparse.SUPPRESS, is_dockerw_arg=False)
+
+def _dockerw_load(dockerw_load_path: str) -> list:
+    defaults_file_path = pathlib.Path(dockerw_load_path, '.dockerw/defaults.py')
+    return shlex.split(' '.join(parse_defaults_file(defaults_file_path).get('dockerw_defaults', '')))
+
+def _yes_no_prompt(prompt_msg: str, answer_default: bool, is_interactive: bool) -> bool:
+    prompt_default = 'Y/n' if answer_default else 'N/y'
+    answer_default = 'yes' if answer_default else 'no'
+    prompt_str = f'{prompt_msg} [{prompt_default}]: '
+    if is_interactive:
+        answer = input(prompt_str).lower() or answer_default
+    else:
+        answer = answer_default
+        print(f'{prompt_str}{answer}')
+    while answer[:1] not in ['y', 'n']:
+        print('Please answer yes or no...')
+        answer = input(prompt_str).lower() or answer_default
+    return True if answer[:1] == 'y' else False
+
+def dockerw_run(args: list) -> None:
+    last_parse_index = args.index('--') if '--' in args else len(args)
+    args, container_cmds = args[0:last_parse_index], args[last_parse_index:]
+    image_nargs = '*' if container_cmds else argparse.REMAINDER
+
+    try:
+        load_parser = argparse.ArgumentParser()
+        load_parser.add_argument('--load', default='')
+        load_parser.add_argument('--disable-auto-load', action='store_true')
+        load_args, ignore_other_args = load_parser.parse_known_args(args)
+        if load_args.load:
+            os.chdir(pathlib.Path(re.sub(r'^~', pwd.getpwuid(DOCKERW_UID).pw_dir, load_args.load)).resolve())
+        elif not load_args.disable_auto_load:
+            defaults_file_path = find_nearest_defaults_file_path()
+            if defaults_file_path:
+                load_args.load = str(defaults_file_path.parent.parent)
+        if load_args.load:
+            args = _dockerw_load(load_args.load) + args
+    except FileNotFoundError:
+        exit(f'Error: Load path does not exist: {load_args.load}')
+
+    exec_parser = _DockerwParser()
+    exec_parser.add_argument('image', nargs=image_nargs, help=argparse.SUPPRESS)
+    _add_docker_args(exec_parser, 'exec')
+
+    run_parser = _DockerwParser()
+    _add_docker_args(run_parser, 'run', ignore_args=['--help', '--version', '--user'])
+    run_parser.add_argument('image',               nargs=image_nargs, help=argparse.SUPPRESS)
+    run_parser.add_argument('--help',              action=_InfoAction, nargs=0, help=argparse.SUPPRESS, is_dockerw_arg=False)
+    run_parser.add_argument('--version',           action=_InfoAction, nargs=0, help=argparse.SUPPRESS, is_dockerw_arg=False)
+    run_parser.add_argument('--user',              action=_UserAction, nargs=1, help=argparse.SUPPRESS, is_dockerw_arg=False)
+    run_parser.add_argument('--load',              metavar='string', help='Load dockerw project')
+    run_parser.add_argument('--disable-auto-load', action='store_true', help='Disable auto loading of dockerw project')
+    run_parser.add_argument('--default-image',     metavar='string', help='Default image if not specified')
+    run_parser.add_argument('--default-shell',     metavar='string', help='Default shell to use inside container')
+    run_parser.add_argument('--defaults',          action=_DefaultsAction, nargs=0, help='Enable dockerw default args')
+    run_parser.add_argument('--x11',               action=_X11Action, nargs=0, help='Enable x11 support if possible')
+    run_parser.add_argument('--venv',              action=_VenvAction, nargs=0, help='Enable user creation')
+    run_parser.add_argument('--login-shell',       action='store_true', help='Enable login shell for venv (venv must be enabled)')
+    run_parser.add_argument('--dood',              action=_DoodAction, nargs=0, help='Enable Docker-outside-of-Docker')
+    run_parser.add_argument('--print-cmd',         action='store_true', help='Print dockerw generated command')
+    run_parser.add_argument('--print-defaults',    action='store_true', help='Print dockerw args generated by "--defaults" flag')
+    run_parser.add_argument('--copy',              action=_CopyAction, nargs=1, metavar='list',
+                            help='Bind mount and copy a volume (venv must be enabled)')
+    run_parser.add_argument('--prompt-banner',     metavar='string',
+                            help='CLI prompt banner to display. Default is docker image name (venv must be enabled)')
+    run_parser.add_argument('--auto-attach',       action='store_true', default=None,
+                            help='Enable auto attach to named container if already running')
+    run_parser.add_argument('--auto-replace',      action='store_true', default=None,
+                            help='Enable auto replace of named container if already running')
+    run_parser.add_argument('--user-lock',         action='store_true',
+                            help='User lock container shell (venv must be enabled). NOTE: This is not a secure lock and can be easily bypassed. It is intended as a lightweight guard for use in trusted environments')
+
+    args = run_parser.parse_args(args)
+    if not args.image and args.default_image:
+        args.image = [args.default_image]
+    if args.image:
+        args.image += container_cmds[1:]
+        image_repo, image_name, image_tag = _parse_image_name(args.image[0])
+        args.image[0] = f'{image_repo}/{image_name}:{image_tag}'
+    else:
+        image_repo, image_name, image_tag = '', '', ''
+        args.image = ['']
+
+    docker_cmd = 'run'
+    container_name = args.name if args.name else ''
+    current_container_name_image = ''
+    is_current_container_name_running = True
+    filter_status = f"--filter status={' --filter status='.join(['restarting', 'running', 'removing', 'paused'])}"
+    containers = _run_os_cmd(f'docker ps -a {filter_status} --format {{{{.Names}}}},{{{{.Image}}}}').stdout.splitlines()
+    containers = [container.split(',')[-1] for container in containers if container.split(',')[0] == container_name]
+    if not containers:
+        is_current_container_name_running = False
+        filter_status = f"--filter status={' --filter status='.join(['created', 'exited', 'dead'])}"
+        containers = _run_os_cmd(f'docker ps -a {filter_status} --format {{{{.Names}}}},{{{{.Image}}}}').stdout.splitlines()
+        containers = [container.split(',')[-1] for container in containers if container.split(',')[0] == container_name] + ['']
+    current_container_name_image = containers[0]
+    if not current_container_name_image:
+        is_attach_container, is_replace_container = False, False
+    else:
+        is_attach_container, is_replace_container = args.auto_attach, args.auto_replace
+        current_container_name_image = '{}/{}:{}'.format(*_parse_image_name(current_container_name_image))
+        if current_container_name_image != args.image[0] or not is_current_container_name_running:
+            if is_attach_container and not is_replace_container:
+                if not is_current_container_name_running:
+                    print(f'Warning: Cannot auto-attach to container name "{container_name}" when in non-running state', file=sys.stderr)
+                else:
+                    print(f'Warning: Cannot auto-attach to container name "{container_name}" using a different image', file=sys.stderr)
+                    print(f'         running image:   {current_container_name_image}', file=sys.stderr)
+                    print(f"         requested image: {args.image[0]}", file=sys.stderr)
+                print(f'Warning: Disabled auto-attach', file=sys.stderr)
+            is_attach_container = False
+        if is_attach_container == None and is_replace_container == None:
+            is_attach_container = _yes_no_prompt('Attach to already running instance?', args.interactive, args.interactive)
+        if is_attach_container:
+            docker_cmd = 'exec'
+            args.image[0] = container_name
+            if len(args.image) == 1:
+                args.image.append(args.default_shell if args.default_shell else 'sh')
+            if len(args.image) == 2 and args.image[1] in DOCKERW_VENV_SHELLS:
+                args.detach = False
+            elif args.detach:
+                args.detach = _yes_no_prompt('Still run command in background?', True, args.interactive)
+            if args.venv:
+                container_user = \
+                    re.search('HOME=/home/(\w+)', _run_os_cmd(f'docker exec {args.image[0]} cat {DOCKERW_VENV_RC_PATH}').stdout)
+                if container_user and container_user.group(1) == DOCKERW_UNAME:
+                    args.user = DOCKERW_UNAME
+            is_replace_container = False
+        elif is_replace_container == None:
+            is_replace_container = _yes_no_prompt('Replace already running instance?', False, args.interactive)
+
+    if args.print_cmd:
+        if is_replace_container:
+            print(f'docker rm -f {container_name}')
+        elif docker_cmd == 'exec':
+            exec_args, ignore_other_args = exec_parser.parse_known_args(_parsed_args_to_list(args))
+            exec_args.image = args.image
+            args = exec_args
+        print(_shlex_join(['docker', docker_cmd] + _parsed_args_to_list(args)))
         exit(0)
-    elif 'dockerw_print_defaults' in post_args:
-        print(' '.join(post_args['dockerw_print_defaults']))
+    elif args.print_defaults:
+        default_args = run_parser.parse_args(['--defaults'])
+        print('', f'DOCKERW DEFAULT ARGS (--defaults):', '', _shlex_join(_parsed_args_to_list(default_args)), '', sep='\n')
+        if load_args.load:
+            print(f'PROJECT DEFAULT ARGS ({load_args.load}):', '', _shlex_join(_dockerw_load(load_args.load)), '', sep='\n')
         exit(0)
-    if '--env=DOCKERW_VENV=1' in args:
+    if docker_cmd == 'run' and args.venv:
         oldmask = os.umask(0o000)
         pathlib.Path('/tmp/dockerw').mkdir(parents=True, exist_ok=True)
         os.umask(oldmask)
         venv_file = tempfile.NamedTemporaryFile('w', dir='/tmp/dockerw', delete=False)
-        args.append(f'--env=DOCKERW_VENV_IMG={parsed_image_cmd[0]}')
-        args.append(f'--env=DOCKERW_VENV_IMG_REPO={image_repo}')
-        args.append(f'--env=DOCKERW_VENV_IMG_NAME={image_name}')
-        args.append(f'--env=DOCKERW_VENV_IMG_TAG={image_tag}')
-        prompt_banner = post_args.get('dockerw_prompt_banner', parsed_image_cmd[0])
+        args.env.append(f'DOCKERW_VENV_IMG={args.image[0]}')
+        args.env.append(f'DOCKERW_VENV_IMG_REPO={image_repo}')
+        args.env.append(f'DOCKERW_VENV_IMG_NAME={image_name}')
+        args.env.append(f'DOCKERW_VENV_IMG_TAG={image_tag}')
+        prompt_banner = args.prompt_banner if args.prompt_banner else args.image[0]
         blue, green, normal, invert = '\033[34m', '\033[32m', '\033[0m', '\033[7m'
         cpu_name = _run_os_cmd("grep -m 1 'model name[[:space:]]*:' /proc/cpuinfo | cut -d ' ' -f 3- | sed 's/(R)/®/g; s/(TM)/™/g;'").stdout
         cpu_vcount = _run_os_cmd("grep -o 'processor[[:space:]]*:' /proc/cpuinfo | wc -l").stdout
         cpu = f'{cpu_name.strip()} ({cpu_vcount.strip()} vCPU)'
         fl = 52 # format length for middle column
         cfl = fl + len(bytearray(cpu, sys.stdout.encoding)) - len(cpu) # cpu format length for middle column
-        print(f'# shellcheck disable=SC2148,SC2016',
+        print(f'##################################################################',
+              f'# This file is generated by dockerw. Please do not modify by hand.\n',
+              f'# shellcheck disable=SC2148,SC2016',
               f'if [ -z "$SHELL" ]; then SHELL="$(command -v sh)"; export SHELL; fi',
               f'if [ "$(basename "$SHELL")" = "sh" ]; then',
               f'  if bash --help > /dev/null 2>&1; then SHELL="$(command -v bash)"; export SHELL; fi',
@@ -208,14 +396,14 @@ def dockerw_run(args: list) -> None:
               f'if groupadd --help > /dev/null 2>&1; then',
               f'  groupadd -g {DOCKERW_GID} {DOCKERW_UNAME} > /dev/null 2>&1',
               f'  useradd -s "$SHELL" -u {DOCKERW_UID} -m {DOCKERW_UNAME} -g {DOCKERW_GID} > /dev/null 2>&1',
-              f'  {"" if "dockerw_dood" in post_args else "# "}groupadd -g {os.stat("/var/run/docker.sock").st_gid} dood > /dev/null 2>&1',
-              f'  {"" if "dockerw_dood" in post_args else "# "}usermod -aG dood {DOCKERW_UNAME} > /dev/null 2>&1',
+              f'  {"" if args.dood else "# "}groupadd -g {os.stat("/var/run/docker.sock").st_gid} dood > /dev/null 2>&1',
+              f'  {"" if args.dood else "# "}usermod -aG dood {DOCKERW_UNAME} > /dev/null 2>&1',
               f'  usermod -aG wheel {DOCKERW_UNAME} > /dev/null 2>&1',
               f'else',
               f'  addgroup -g {DOCKERW_GID} {DOCKERW_UNAME} > /dev/null 2>&1',
               f'  adduser -s "$SHELL" -u {DOCKERW_UID} -D {DOCKERW_UNAME} -G {DOCKERW_UNAME} > /dev/null 2>&1',
-              f'  {"" if "dockerw_dood" in post_args else "# "}addgroup -g {os.stat("/var/run/docker.sock").st_gid} dood > /dev/null 2>&1',
-              f'  {"" if "dockerw_dood" in post_args else "# "}addgroup {DOCKERW_UNAME} dood > /dev/null 2>&1',
+              f'  {"" if args.dood else "# "}addgroup -g {os.stat("/var/run/docker.sock").st_gid} dood > /dev/null 2>&1',
+              f'  {"" if args.dood else "# "}addgroup {DOCKERW_UNAME} dood > /dev/null 2>&1',
               f'  addgroup {DOCKERW_UNAME} wheel > /dev/null 2>&1',
               f'fi',
               f'mkdir -p /home/{DOCKERW_UNAME}',
@@ -230,6 +418,8 @@ def dockerw_run(args: list) -> None:
               f'chown -h {DOCKERW_UID}:{DOCKERW_GID} /home/{DOCKERW_UNAME}/workdir > /dev/null 2>&1',
               f'mkdir -p {DOCKERW_VENV_PATH}',
               f'# shellcheck disable=SC2129',
+              f'echo \'##################################################################\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'# This file is generated by dockerw. Please do not modify by hand.\n\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'# shellcheck disable=SC2148\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo unset PROMPT_COMMAND >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'HOSTNAME="${{HOSTNAME:-{platform.node()}}}"\' >> {DOCKERW_VENV_RC_PATH}',
@@ -251,6 +441,24 @@ def dockerw_run(args: list) -> None:
               f'echo \'esac\' >> {DOCKERW_VENV_RC_PATH}',
               f'# shellcheck disable=SC2129',
               f'echo \'if [ "$(id -u)" != "{DOCKERW_UID}" ] && [ "$SUDO_UID" != "{DOCKERW_UID}" ]; then\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'  _is_user_lock={str(args.user_lock).lower()}\' >> {DOCKERW_VENV_RC_PATH}',
+              f'echo \'  if $_is_user_lock; then\' >> {DOCKERW_VENV_RC_PATH}',
+              fr"""cat << 'EOF' >> {DOCKERW_VENV_RC_PATH}
+cat << 'EOT'
+              ,
+     __  _.-"` `'-.
+    /||\'._ __{{}}_(
+    ||||  |'--.__\
+    |  L.(   ^_\^
+    \ .-' |   _ |
+    | |   )\___/
+    |  \-'`:._]
+    \__/;      '-.
+EOT
+EOF""",
+              f"echo '    echo \"Container shell is user locked.\"' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo '    exit' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo '  fi' >> {DOCKERW_VENV_RC_PATH}",
               f'echo "  cd $PWD || exit" >> {DOCKERW_VENV_RC_PATH}',
               f'echo "  HOME=/home/{DOCKERW_UNAME}" >> {DOCKERW_VENV_RC_PATH}',
               f'echo "  export HOME" >> {DOCKERW_VENV_RC_PATH}',
@@ -288,7 +496,8 @@ def dockerw_run(args: list) -> None:
               fr"echo '_disk_free'=\$\(df -h / \| awk \'FNR == 2 {{ print \$4 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
               f'# shellcheck disable=SC1083',
               fr"echo '_disk_used'=\$\(df -h / \| awk \'FNR == 2 {{ print \$3 }}\'\) >> {DOCKERW_VENV_RC_PATH}",
-              fr"""_login_banner=$(cat << "EOF"
+              fr"""cat << 'EOF' >> {DOCKERW_VENV_RC_PATH}
+cat << 'EOT'
                  ,,))))))));,
               __)))))))))))))),
    \|/       -\(((((''''((((((((.     .----------------------------.
@@ -304,13 +513,9 @@ def dockerw_run(args: list) -> None:
            / //  _;______;'------~~~~~    /;;/\    /
           //  | |                        / ;   \;;,\
          (<_  | ;                      /',/-----'  _>
-          \_| ||_                     //~;~~~~~~~~~""",
-              f'EOF',
-              f')',
-              f'# shellcheck disable=SC2129',
-              f'echo \'cat << "EOF"\' >> {DOCKERW_VENV_RC_PATH}',
-              f'echo "$_login_banner" >> {DOCKERW_VENV_RC_PATH}',
-              f'echo \'EOF\' >> {DOCKERW_VENV_RC_PATH}',
+          \_| ||_                     //~;~~~~~~~~~
+EOT
+EOF""",
               f'# shellcheck disable=SC2129',
               f'echo \'echo \"$_g─────────────╴$_n\\`\-| $_g─────────────────$_n \\(,~~ $_g─────────────────────────────────────\"\' >> {DOCKERW_VENV_RC_PATH}',
               f'echo \'echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$_n \~| $_g━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\"\' >> {DOCKERW_VENV_RC_PATH}',
@@ -339,7 +544,7 @@ def dockerw_run(args: list) -> None:
               f'    $_exec su -p "$_username" -c "$*"',
               f'  fi',
               f'}}', sep='\n', file=venv_file)
-        for dest_path in [ volume.split(':')[1] for volume in args if volume.startswith('--volume=') ]:
+        for dest_path in [ volume.split(':')[1] for volume in args.volume ]:
             dest_path = pathlib.Path(dest_path)
             if str(dest_path).startswith(str(DOCKERW_VENV_COPY_PATH)):
                 cp_cmd = f'cp -afT {dest_path} /{dest_path.relative_to(DOCKERW_VENV_COPY_PATH)}'
@@ -350,59 +555,22 @@ def dockerw_run(args: list) -> None:
                       f'  chown $(stat -c \"%u:%g\" {dest_path}) /{dest_path.relative_to(DOCKERW_VENV_COPY_PATH)}',
                       f'fi',
                       f'run_user_cmd false {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_UNAME} {cp_cmd}', sep='\n', file=venv_file)
-        if len(parsed_image_cmd) == 1:
-            cmd = '"$SHELL"'
-        elif '--' == parsed_image_cmd[1]:
-            cmd = ' '.join(parsed_image_cmd[2:]) if parsed_image_cmd[2:] != [] else '"$SHELL"'
+        if len(args.image) == 1:
+            cmd = args.default_shell if args.default_shell else '"$SHELL"'
         else:
-            cmd = ' '.join(parsed_image_cmd[1:])
+            cmd = ' '.join(args.image[1:])
         print(f'run_user_cmd true {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_UNAME} {cmd}', file=venv_file)
         venv_file.close()
-        args.append('--volume=/tmp/dockerw:/tmp/dockerw')
-        parsed_image_cmd = [parsed_image_cmd[0]]
-        parsed_image_cmd += ['-l', venv_file.name] if post_args.get('dockerw_login_shell') else [venv_file.name]
-    os.execvpe('docker', ['docker', 'run'] + args + parsed_image_cmd, env=os.environ.copy())
-
-def _dockerw_help_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> None:
-    print(_run_os_cmd('docker run --help').stdout.replace('docker run', 'dockerw'))
-    print('Dockerw Options:')
-    print(parsed_args['dockerw_help'].format_help().split('options:')[-1].lstrip('\n'))
-    exit(0)
-
-def _dockerw_version_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> None:
-    print('Dockerw version', __version__)
-    print(_run_os_cmd('docker --version').stdout.rstrip())
-    exit(0)
-
-def _dockerw_image_default_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
-    if parsed_image_cmd == [] or parsed_image_cmd[0] == '--':
-        parsed_image_cmd.insert(0, parsed_args['dockerw_image_default'])
-    return []
-
-def _dockerw_x11_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
-    if os.geteuid() != 0:
-        result = _run_os_cmd('xauth info | grep "Authority file" | awk \'{ print $3 }\'')
-    else:
-        result = _run_os_cmd(f'su {DOCKERW_UNAME} -c "xauth info" | grep "Authority file" | awk \'{{ print $3 }}\'')
-    if result.returncode == 0 and pathlib.PosixPath('/tmp/.X11-unix').exists():
-        return ['-e=DISPLAY', '-v=/tmp/.X11-unix:/tmp/.X11-unix:ro',
-                f'-v={result.stdout.strip()}:~/.Xauthority:ro']
-    return []
-
-def _dockerw_dood_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
-    post_args['dockerw_dood'] = parsed_args['dockerw_dood']
-    return ['-v=/var/run/docker.sock:/var/run/docker.sock']
-
-def _dockerw_venv_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
-    return ['--user=root', '--entrypoint=sh', '-e=DOCKERW_VENV=1',
-            f'-e=ENV={DOCKERW_VENV_RC_PATH}'] if 'user' not in parsed_args else []
-
-def _dockerw_login_shell_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
-    post_args['dockerw_login_shell'] = True
-    return []
-
-def _dockerw_copy_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
-    return [ f'-v {arg}' for arg in _update_volume_paths(parsed_args['dockerw_copy'], True) ]
+        args.volume.append('/tmp/dockerw:/tmp/dockerw')
+        args.image = [args.image[0]]
+        args.image += ['-l', venv_file.name] if args.login_shell else [venv_file.name]
+    if is_replace_container:
+        _run_os_cmd(f'docker rm -f {container_name}')
+    elif docker_cmd == 'exec':
+        exec_args, ignore_other_args = exec_parser.parse_known_args(_parsed_args_to_list(args))
+        exec_args.image = args.image
+        args = exec_args
+    os.execvpe('docker', ['docker', docker_cmd] + _parsed_args_to_list(args), env=os.environ.copy())
 
 def find_nearest_defaults_file_path() -> pathlib.Path:
     for path in [pathlib.Path.cwd(), *pathlib.Path.cwd().parents]:
@@ -413,14 +581,11 @@ def find_nearest_defaults_file_path() -> pathlib.Path:
 
 def parse_defaults_file(defaults_file_path: pathlib.Path) -> dict:
     if defaults_file_path and defaults_file_path.exists():
-        cfg = { '__file__': str(defaults_file_path) }
+        cfg = { '__file__': str(defaults_file_path),
+                'dockerw': SourceFileLoader('dockerw', str(pathlib.PosixPath(__file__).resolve())).load_module() }
         exec(open(cfg['__file__']).read(), cfg)
         return cfg
     return {}
-
-def _dockerw_load_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
-    defaults_file_path = pathlib.Path(parsed_args['dockerw_load'], '.dockerw/defaults.py')
-    return parse_defaults_file(defaults_file_path).get('dockerw_defaults', [])
 
 def get_volume_arg(src: str, dest_path: str='', is_copy: bool=False) -> str:
     src_path = pathlib.PosixPath(re.sub(r'^~', pwd.getpwuid(DOCKERW_UID).pw_dir, src)).resolve()
@@ -430,34 +595,15 @@ def get_volume_arg(src: str, dest_path: str='', is_copy: bool=False) -> str:
         return f'--{action} {src_path}:{dest_path}'
     return ''
 
-def _dockerw_defaults_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
-    defaults = ['-it --venv --x11 --rm --init --privileged --network host --security-opt seccomp=unconfined',
-                f'--dood --detach-keys=ctrl-q,ctrl-q --hostname {platform.node()} -e TERM=xterm-256color']
-    for is_copy, paths in [(False, ['~/.bash_history', '~/.vscode', '~/.emacs', '~/.emacs.d', '~/.vimrc']),
-                           (True,  ['~/.gitconfig', '~/.ssh'])]:
-        for path in paths:
-            defaults.append(get_volume_arg(path, is_copy=is_copy))
-    if 'workdir' not in parsed_args:
-        defaults.append('-w /app')
-        defaults.append(f'-v {pathlib.Path.cwd()}:/app')
-    return defaults
-
-def _dockerw_print_defaults_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
-    post_args['dockerw_print_defaults'] = _dockerw_defaults_args(parsed_args, parsed_image_cmd, post_args)
-    return []
-
-def _dockerw_prompt_banner_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
-    post_args['dockerw_prompt_banner'] = parsed_args['dockerw_prompt_banner']
-    return []
-
-def _dockerw_print_args(parsed_args: dict, parsed_image_cmd: list, post_args: dict) -> list:
-    post_args['dockerw_print'] = True
-    return []
-
 def main() -> None:
-    if len(sys.argv) > 1 and sys.argv[1] == 'run':
-        dockerw_run(sys.argv[2:])
-    os.execvpe('docker', sys.argv, env=os.environ.copy())
+    try:
+        if len(sys.argv) > 1 and sys.argv[1] == 'run':
+            dockerw_run(sys.argv[2:])
+        elif sys.argv[1] == '--version':
+            _InfoAction('--version', None).__call__(None, option_string='--version')
+        os.execvpe('docker', sys.argv, env=os.environ.copy())
+    except KeyboardInterrupt:
+        exit('\nError: KeyboardInterrupt received')
 
 if __name__ == '__main__':
     main()
