@@ -23,7 +23,7 @@ Docker run wrapper script.
 #  2. MINOR version when you add functionality in a backwards compatible manner
 #  3. PATCH version when you make backwards compatible bug fixes
 # Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
-__version__ = '1.0.1'
+__version__ = '1.0.2'
 __title__ = 'dockerw'
 __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
@@ -342,8 +342,10 @@ def dockerw_run(args: list) -> None:
             args.image[0] = container_name
             if len(args.image) == 1:
                 args.image.append(args.default_shell if args.default_shell else 'sh')
-            if len(args.image) == 2 and args.image[1] in DOCKERW_VENV_SHELLS:
+            if len(args.image) == 2 and pathlib.PurePath(args.image[1]).name in DOCKERW_VENV_SHELLS:
                 args.detach = False
+                rows, cols = _run_os_cmd('stty size').stdout.split()
+                args.env.append(f'DOCKERW_STTY_INIT=rows {rows} cols {cols}')
             elif args.detach:
                 args.detach = _yes_no_prompt('Still run command in background?', True, args.interactive)
             if args.venv:
@@ -482,6 +484,10 @@ EOF""",
               f"echo '    exec su -p {DOCKERW_UNAME} \"$0\"' >> {DOCKERW_VENV_RC_PATH}",
               f"echo '  fi' >> {DOCKERW_VENV_RC_PATH}",
               f"echo 'fi' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo 'if [ -n \"$DOCKERW_STTY_INIT\" ]; then' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo '  stty $DOCKERW_STTY_INIT' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo '  unset DOCKERW_STTY_INIT' >> {DOCKERW_VENV_RC_PATH}",
+              f"echo fi >> {DOCKERW_VENV_RC_PATH}",
               f'# shellcheck disable=SC1083',
               fr"echo '_uptime'=\"\$\(awk \'{{ printf \"%d\", \$1 }}\' /proc/uptime\)\" >> {DOCKERW_VENV_RC_PATH}",
               fr"echo '_minutes'=\$\(\(_uptime / 60\)\) >> {DOCKERW_VENV_RC_PATH}",
