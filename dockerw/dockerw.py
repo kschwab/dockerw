@@ -23,7 +23,7 @@ Docker run wrapper script.
 #  2. MINOR version when you add functionality in a backwards compatible manner
 #  3. PATCH version when you make backwards compatible bug fixes
 # Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 __title__ = 'dockerw'
 __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
@@ -281,6 +281,8 @@ def dockerw_run(args: list) -> None:
     run_parser.add_argument('--venv',                action=_VenvAction, nargs=0, help='Enable user creation')
     run_parser.add_argument('--login-shell',         action='store_true', help='Enable login shell for venv (venv must be enabled)')
     run_parser.add_argument('--dood',                action=_DoodAction, nargs=0, help='Enable Docker-outside-of-Docker')
+    run_parser.add_argument('--args-only',           action='store_true',
+                            help='Print dockerw generated command arguments only. May also be used in conjunction with --print-cmd or --cache-cmd')
     run_parser.add_argument('--cache-cmd',           action='store_true', help='Prints and caches the dockerw generated command')
     run_parser.add_argument('--print-cmd',           action='store_true', help='Print dockerw generated command')
     run_parser.add_argument('--print-defaults',      action='store_true', help='Print dockerw default generated args')
@@ -358,14 +360,18 @@ def dockerw_run(args: list) -> None:
             container_state = 'already running' if is_current_container_name_running else 'existing'
             is_replace_container = _yes_no_prompt(f'Replace {container_state} instance?', False, args.interactive)
 
-    if args.print_cmd:
+    existing_tmp_dockerw_vol = [vol for vol in args.volume if re.match(r'/tmp/dockerw[/:]', vol)]
+    if existing_tmp_dockerw_vol:
+        exit(f"Error: Volume '{existing_tmp_dockerw_vol[0]}' uses '/tmp/dockerw' which is reserved for dockerw internal usage. Please use different directory.")
+    if args.print_cmd or (args.args_only and not args.cache_cmd):
         if is_replace_container:
-            print(f'docker rm -f {container_name}')
+            if not args.args_only:
+                print(f'docker rm -f {container_name}')
         elif docker_cmd == 'exec':
             exec_args, ignore_other_args = exec_parser.parse_known_args(_parsed_args_to_list(args))
             exec_args.image = args.image
             args = exec_args
-        print(_shlex_join(['docker', docker_cmd] + _parsed_args_to_list(args)))
+        print(_shlex_join((['docker', docker_cmd] if not args.args_only else []) + _parsed_args_to_list(args)))
         exit(0)
     elif args.print_defaults:
         default_args = run_parser.parse_args(['--defaults'])
@@ -373,10 +379,9 @@ def dockerw_run(args: list) -> None:
         if load_args.load:
             print(f'PROJECT DEFAULT ARGS ({load_args.load}):', '', _shlex_join(_dockerw_load(load_args.load)), '', sep='\n')
         exit(0)
-    if args.clean_cmd_cache:
-        _run_os_cmd('find /tmp/dockerw -mtime +1 -delete')
-        if not args.image[0]:
-            exit(0)
+    _run_os_cmd('find /tmp/dockerw -mtime +1 -delete')
+    if not args.image[0]:
+        exit(0)
     if docker_cmd == 'run' and args.venv:
         oldmask = os.umask(0o000)
         pathlib.Path('/tmp/dockerw').mkdir(parents=True, exist_ok=True)
@@ -594,7 +599,7 @@ EOF""",
     if not args.cache_cmd:
         os.execvpe('docker', ['docker', docker_cmd] + _parsed_args_to_list(args), env=os.environ.copy())
     else:
-        print(_shlex_join(['docker', docker_cmd] + _parsed_args_to_list(args)))
+        print(_shlex_join((['docker', docker_cmd] if not args.args_only else []) + _parsed_args_to_list(args)))
         exit(0)
 
 def find_nearest_defaults_file_path() -> pathlib.Path:
