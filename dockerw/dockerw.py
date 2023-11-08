@@ -23,7 +23,7 @@ Docker run wrapper script.
 #  2. MINOR version when you add functionality in a backwards compatible manner
 #  3. PATCH version when you make backwards compatible bug fixes
 # Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
-__version__ = '1.2.1'
+__version__ = '1.2.2'
 __title__ = 'dockerw'
 __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
@@ -591,6 +591,7 @@ EOF""",
         args.volume.append('/tmp/dockerw:/tmp/dockerw')
         args.entrypoint = venv_file.name
     is_cache_cmd = args.cache_cmd
+    is_args_only = args.args_only
     if is_replace_container:
         _run_os_cmd(f'docker rm -f {container_name}')
     elif docker_cmd == 'exec':
@@ -600,7 +601,7 @@ EOF""",
     if not is_cache_cmd:
         os.execvpe('docker', ['docker', docker_cmd] + _parsed_args_to_list(args), env=os.environ.copy())
     else:
-        print(_shlex_join((['docker', docker_cmd] if not args.args_only else []) + _parsed_args_to_list(args)))
+        print(_shlex_join((['docker', docker_cmd] if not is_args_only else []) + _parsed_args_to_list(args)))
         exit(0)
 
 def find_nearest_defaults_file_path() -> pathlib.Path:
