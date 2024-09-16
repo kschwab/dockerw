@@ -244,6 +244,12 @@ def _write_venv_sh(venv_entrypoint_name: str, parsed_args: argparse.Namespace) -
     with open(sh_file, 'w') as sh:
         sh.write('#!/bin/.dockerw/sh')
         sh.write(textwrap.dedent(fr"""
+            if [ ! -f {DOCKERW_VENV_USERLOCK_PATH} ]; then
+              echo "Waiting for dockerw venv setup to complete..."
+              while [ ! -f {DOCKERW_VENV_USERLOCK_PATH} ]; do
+                sleep 0.10
+              done
+            fi
             _cmd="$(basename $0)"
             _is_vscode={str(parsed_args.vscode).lower()}
             if $_is_vscode && [ "$_cmd $*" = "getent passwd root" ] && [ -n "$DOCKERW_VENV_IS_VSCODE_INSTALL" ]; then
@@ -462,8 +468,6 @@ def _write_venv_entrypoint(venv_file: typing.TextIO, parsed_args: argparse.Names
         export HOME
         ENV={DOCKERW_VENV_RC_PATH}
         export ENV
-        printf {'🔒' if parsed_args.user_lock else "''"} > {DOCKERW_VENV_USERLOCK_PATH}
-        chown {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_VENV_USERLOCK_PATH}
         run_user_cmd() {{
           _is_exec=$1; shift
           _userspec=$1; shift
@@ -490,6 +494,8 @@ def _write_venv_entrypoint(venv_file: typing.TextIO, parsed_args: argparse.Names
                 fi
                 run_user_cmd false {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_UNAME} {cp_cmd}"""))
     venv_file.write(textwrap.dedent(f"""
+        printf {'🔒' if parsed_args.user_lock else "''"} > {DOCKERW_VENV_USERLOCK_PATH}
+        chown {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_VENV_USERLOCK_PATH}
         if [ $# -eq 0 ]; then _dockerw_cmd="$SHELL"; else _dockerw_cmd="$*"; fi
         # shellcheck disable=SC2086
         run_user_cmd true {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_UNAME} $_dockerw_cmd
@@ -500,6 +506,7 @@ def _write_venv_entrypoint(venv_file: typing.TextIO, parsed_args: argparse.Names
     parsed_args.entrypoint = venv_file.name
 
 def dockerw_run(args: list) -> None:
+    orig_args = args[:]
     last_parse_index = args.index('--') if '--' in args else len(args)
     args, container_cmds = args[0:last_parse_index], args[last_parse_index:]
     image_nargs = '*' if container_cmds else argparse.REMAINDER
@@ -672,7 +679,7 @@ def dockerw_run(args: list) -> None:
     if not is_cache_cmd:
         if docker_cmd == 'run' and args.detach and args.auto_attach:
             _run_os_cmd(_shlex_join(['docker', docker_cmd] + _parsed_args_to_list(args)))
-            dockerw_run(sys.argv[2:])
+            dockerw_run(orig_args)
         os.execvpe('docker', ['docker', docker_cmd] + _parsed_args_to_list(args), env=os.environ.copy())
     else:
         print(_shlex_join((['docker', docker_cmd] if not is_args_only else []) + _parsed_args_to_list(args)))
