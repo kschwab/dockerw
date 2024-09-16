@@ -23,7 +23,7 @@ Docker run wrapper script.
 #  2. MINOR version when you add functionality in a backwards compatible manner
 #  3. PATCH version when you make backwards compatible bug fixes
 # Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
-__version__ = '1.2.3'
+__version__ = '1.3.0'
 __title__ = 'dockerw'
 __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
@@ -60,6 +60,7 @@ DOCKERW_VENV_HOME_PATH = DOCKERW_VENV_PATH / f'home/{DOCKERW_UNAME}'
 DOCKERW_VENV_COPY_PATH = DOCKERW_VENV_PATH / 'copy'
 DOCKERW_VENV_RC_PATH   = DOCKERW_VENV_PATH / 'rc.sh'
 DOCKERW_VENV_SH_PATH   = DOCKERW_VENV_PATH / 'venv.sh'
+DOCKERW_VENV_USERLOCK_PATH = DOCKERW_VENV_PATH / 'USERLOCK'
 DOCKERW_VENV_SHELLS = ('sh', 'bash', 'dash', 'ksh', 'ash')
 
 class _DockerwParser(argparse.ArgumentParser):
@@ -243,10 +244,26 @@ def _write_venv_sh(venv_entrypoint_name: str, parsed_args: argparse.Namespace) -
     with open(sh_file, 'w') as sh:
         sh.write('#!/bin/.dockerw/sh')
         sh.write(textwrap.dedent(fr"""
-            _shell="$(dirname $0)/.dockerw/sh"
+            if [ ! -e {DOCKERW_VENV_USERLOCK_PATH} ] && [ -z "$DOCKERW_VENV_IS_ENTRYPOINT" ]; then
+              echo "Waiting for dockerw venv setup to complete..."
+              while [ ! -e {DOCKERW_VENV_USERLOCK_PATH} ]; do
+                sleep 0.10
+              done
+            fi
+            _cmd="$(basename $0)"
+            _is_vscode={str(parsed_args.vscode).lower()}
+            if $_is_vscode && [ "$_cmd $*" = "getent passwd root" ] && [ -n "$DOCKERW_VENV_IS_VSCODE_INSTALL" ]; then
+              unset DOCKERW_VENV_IS_VSCODE_INSTALL
+              cat /etc/passwd | grep {DOCKERW_UNAME} | sed 's/^{DOCKERW_UNAME}/root/'
+              exit 0
+            fi
+            _shell="$(dirname $0)/.dockerw/$_cmd"
             if [ "$(id -u)" != "{DOCKERW_UID}" ] && [ "$SUDO_UID" != "{DOCKERW_UID}" ]; then
-              _is_user_lock={str(parsed_args.user_lock).lower()}
-              if $_is_user_lock; then
+              if $_is_vscode && [ "$(id -u)" = "0" ]; then
+                DOCKERW_VENV_IS_VSCODE_INSTALL=true
+                export DOCKERW_VENV_IS_VSCODE_INSTALL
+              fi
+              if [ -s {DOCKERW_VENV_USERLOCK_PATH} ] && [ -z "$DOCKERW_VENV_IS_ENTRYPOINT" ]; then
             cat << 'EOT'
                           ,
                  __  _.-"` `'-.
@@ -259,9 +276,9 @@ def _write_venv_sh(venv_entrypoint_name: str, parsed_args: argparse.Namespace) -
                 \__/;      '-.
             EOT
                 echo "Container shell is user locked."
-                exit
+                exit 1
               fi
-              cd /app || exit
+              cd /app || exit 1
               HOME=/home/{DOCKERW_UNAME}
               export HOME
               if chroot --userspec={DOCKERW_UID}:{DOCKERW_GID} --skip-chdir / id > /dev/null 2>&1; then
@@ -272,6 +289,19 @@ def _write_venv_sh(venv_entrypoint_name: str, parsed_args: argparse.Namespace) -
                 exec su -p {DOCKERW_UNAME} "$_shell" "$@"
               fi
             fi
+            if [ "$_cmd" != "getent" ]; then
+              if [ "$*" = "--unlock" ]; then
+                printf '' > {DOCKERW_VENV_USERLOCK_PATH}
+                echo userlock off
+                exit 0
+              elif [ "$*" = "--lock" ]; then
+                printf '🔒' > {DOCKERW_VENV_USERLOCK_PATH}
+                echo userlock on
+                exit 0
+              fi
+            fi
+            unset DOCKERW_VENV_IS_ENTRYPOINT
+            unset DOCKERW_VENV_IS_VSCODE_INSTALL
             if [ "$_shell" != "$*" ]; then
               exec "$_shell" "$@"
             else
@@ -303,18 +333,18 @@ def _write_venv_rc_sh(venv_entrypoint_name: str, parsed_args: argparse.Namespace
             _b={blue}
             _i={invert}
             _n={normal}
-            _prompt_banner="📦{prompt_banner}"
+            _prompt_banner="{prompt_banner} 📦"
             _curr_shell="$(command -v "$0")"
             if readlink -f "$_curr_shell" > /dev/null 2>&1; then _curr_shell="$(readlink -f "$_curr_shell")"; fi
             case "$(basename "$_curr_shell")" in
               dash|ksh)
                 _ps1_user="$(whoami)"
-                PS1=$(printf "$_i$_prompt_banner$_n\n$_g$_ps1_user@$HOSTNAME$_n $_b\$PWD$_n\n\\$ ") ;;
+                PS1=$(printf "$_i$_prompt_banner$_n\n$_g$_ps1_user@$HOSTNAME$_n $_b\$PWD$_n\n\$(cat {DOCKERW_VENV_USERLOCK_PATH})\$ ") ;;
               *)
-                PS1="$_i$_prompt_banner$_n\n$_g\u@\h$_n $_b\w$_n\n\\$ " ;;
+                PS1="$_i$_prompt_banner$_n\n$_g\u@\h$_n $_b\w$_n\n\$(cat {DOCKERW_VENV_USERLOCK_PATH})\$ " ;;
             esac
             if [ -n "$DOCKERW_STTY_INIT" ]; then
-              stty "$DOCKERW_STTY_INIT"
+              stty "$DOCKERW_STTY_INIT" > /dev/null 2>&1
               unset DOCKERW_STTY_INIT
             fi
             _uptime="$(awk '{{ printf "%d", $1 }}' /proc/uptime)"
@@ -368,27 +398,37 @@ def _write_venv_entrypoint(venv_file: typing.TextIO, parsed_args: argparse.Names
         ##################################################################
         # This file is generated by dockerw. Please do not modify by hand.
 
+        DOCKERW_VENV_IS_ENTRYPOINT=true
+        export DOCKERW_VENV_IS_ENTRYPOINT
         # shellcheck disable=SC2148,SC2016
         if [ -z "$SHELL" ]; then SHELL="$(command -v sh)"; export SHELL; fi
         if [ "$(basename "$SHELL")" = "sh" ]; then
           if bash --help > /dev/null 2>&1; then SHELL="$(command -v bash)"; export SHELL; fi
         fi
-        mkdir /bin/.dockerw
-        if [ -L /bin/sh ]; then
-          ln -s "$(readlink -f /bin/sh)" /bin/.dockerw/sh
-        else
-          mv /bin/sh /bin/.dockerw/sh
+    """))
+
+    for bin_path in ['/bin', '/usr/bin']:
+        venv_file.write(f'mkdir -p {bin_path}/.dockerw\n')
+        for shell in DOCKERW_VENV_SHELLS:
+            if bin_path == '/bin':
+                venv_file.write(f'mv {bin_path}/{shell} {bin_path}/.dockerw 2>/dev/null && '
+                                f'ln -s {DOCKERW_VENV_SH_PATH} {bin_path}/{shell}\n')
+            else:
+                venv_file.write(f'if [ ! -e {bin_path}/.dockerw/{shell} ]; then')
+                venv_file.write(textwrap.dedent(f"""
+                  mv {bin_path}/{shell} {bin_path}/.dockerw 2>/dev/null && ln -s {DOCKERW_VENV_SH_PATH} {bin_path}/{shell}
+                fi
+                """))
+
+    if parsed_args.vscode:
+        venv_file.write(f'mv /bin/getent /bin/.dockerw 2>/dev/null; ln -s {DOCKERW_VENV_SH_PATH} /bin/getent\n')
+        venv_file.write('if [ ! -e /usr/bin/.dockerw/getent ]; then')
+        venv_file.write(textwrap.dedent(f"""
+          mv /usr/bin/getent /usr/bin/.dockerw 2>/dev/null; ln -s {DOCKERW_VENV_SH_PATH} /usr/bin/getent
         fi
-        ln -sf {DOCKERW_VENV_SH_PATH} /bin/sh
-        if [ -e /usr/bin/sh ] && [ ! -e /usr/bin/.dockerw/sh ]; then
-          mkdir /usr/bin/.dockerw
-          if [ -L /usr/bin/sh ]; then
-            ln -s "$(readlink -f /usr/bin/sh)" /usr/bin/.dockerw/sh
-          else
-            mv /usr/bin/sh /usr/bin/.dockerw/sh
-          fi
-          ln -sf {DOCKERW_VENV_SH_PATH} /usr/bin/sh
-        fi
+        """))
+
+    venv_file.write(textwrap.dedent(f"""
         mkdir -p {DOCKERW_VENV_HOME_PATH}
         {'cp' if parsed_args.cache_cmd else 'mv'} {venv_file.name} {DOCKERW_VENV_HOME_PATH}/.dockerw_entrypoint.sh
         rm {venv_file.name}_*
@@ -425,11 +465,11 @@ def _write_venv_entrypoint(venv_file: typing.TextIO, parsed_args: argparse.Names
         ln -s "$PWD" /home/{DOCKERW_UNAME}/workdir > /dev/null 2>&1
         chown -h {DOCKERW_UID}:{DOCKERW_GID} /home/{DOCKERW_UNAME}/workdir > /dev/null 2>&1
         mkdir -p /.dockerw
-        echo . /.dockerw/rc.sh >> /home/{DOCKERW_UNAME}/.bashrc
-        echo . /.dockerw/rc.sh >> /root/.bashrc
+        echo . {DOCKERW_VENV_RC_PATH} >> /home/{DOCKERW_UNAME}/.bashrc
+        echo . {DOCKERW_VENV_RC_PATH} >> /root/.bashrc
         HOME=/home/{DOCKERW_UNAME}
         export HOME
-        ENV=/.dockerw/rc.sh
+        ENV={DOCKERW_VENV_RC_PATH}
         export ENV
         run_user_cmd() {{
           _is_exec=$1; shift
@@ -457,6 +497,8 @@ def _write_venv_entrypoint(venv_file: typing.TextIO, parsed_args: argparse.Names
                 fi
                 run_user_cmd false {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_UNAME} {cp_cmd}"""))
     venv_file.write(textwrap.dedent(f"""
+        printf {'🔒' if parsed_args.user_lock else "''"} > {DOCKERW_VENV_USERLOCK_PATH}
+        chown {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_VENV_USERLOCK_PATH}
         if [ $# -eq 0 ]; then _dockerw_cmd="$SHELL"; else _dockerw_cmd="$*"; fi
         # shellcheck disable=SC2086
         run_user_cmd true {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_UNAME} $_dockerw_cmd
@@ -467,6 +509,7 @@ def _write_venv_entrypoint(venv_file: typing.TextIO, parsed_args: argparse.Names
     parsed_args.entrypoint = venv_file.name
 
 def dockerw_run(args: list) -> None:
+    orig_args = args[:]
     last_parse_index = args.index('--') if '--' in args else len(args)
     args, container_cmds = args[0:last_parse_index], args[last_parse_index:]
     image_nargs = '*' if container_cmds else argparse.REMAINDER
@@ -505,6 +548,7 @@ def dockerw_run(args: list) -> None:
     run_parser.add_argument('--_dockerw_parse_cwd_', metavar='string',            help=argparse.SUPPRESS, default=str(pathlib.Path.cwd()))
     run_parser.add_argument('--load',                metavar='string', help='Load dockerw project')
     run_parser.add_argument('--disable-auto-load',   action='store_true', help='Disable auto loading of dockerw project')
+    run_parser.add_argument('--vscode',              action='store_true', help='Enable support for VS Code attach to container (venv must be enabled)')
     run_parser.add_argument('--default-image',       metavar='string', help='Default image if not specified')
     run_parser.add_argument('--default-shell',       metavar='string', help='Default shell to use inside container')
     run_parser.add_argument('--defaults',            action=_DefaultsAction, nargs=0, help='Enable dockerw default args')
@@ -583,7 +627,7 @@ def dockerw_run(args: list) -> None:
                 args.detach = _yes_no_prompt('Still run command in background?', True, args.interactive)
             if args.venv:
                 container_user = \
-                    re.search(r'HOME=/home/(\w+)', _run_os_cmd(f'docker exec {args.image[0]} cat {DOCKERW_VENV_RC_PATH}').stdout)
+                    re.search(r'HOME=/home/(\w+)', _run_os_cmd(f'docker exec {args.image[0]} cat {DOCKERW_VENV_SH_PATH}').stdout)
                 if container_user and container_user.group(1) == DOCKERW_UNAME:
                     args.user = DOCKERW_UNAME
             is_replace_container = False
@@ -621,6 +665,7 @@ def dockerw_run(args: list) -> None:
         args.env.append(f'DOCKERW_VENV_IMG_TAG={image_tag}')
         oldmask = os.umask(0o000)
         pathlib.Path('/tmp/dockerw').mkdir(parents=True, exist_ok=True)
+        os.chmod('/tmp/dockerw', 0o777)
         venv_entrypoint_file = tempfile.NamedTemporaryFile('w', dir='/tmp/dockerw', delete=False)
         _write_venv_sh(venv_entrypoint_file.name, args)
         _write_venv_rc_sh(venv_entrypoint_file.name, args)
@@ -635,6 +680,9 @@ def dockerw_run(args: list) -> None:
         exec_args.image = args.image
         args = exec_args
     if not is_cache_cmd:
+        if docker_cmd == 'run' and args.detach and args.auto_attach:
+            _run_os_cmd(_shlex_join(['docker', docker_cmd] + _parsed_args_to_list(args)))
+            dockerw_run(orig_args)
         os.execvpe('docker', ['docker', docker_cmd] + _parsed_args_to_list(args), env=os.environ.copy())
     else:
         print(_shlex_join((['docker', docker_cmd] if not is_args_only else []) + _parsed_args_to_list(args)))
