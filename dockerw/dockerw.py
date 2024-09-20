@@ -23,7 +23,7 @@ Docker run wrapper script.
 #  2. MINOR version when you add functionality in a backwards compatible manner
 #  3. PATCH version when you make backwards compatible bug fixes
 # Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
-__version__ = '1.3.0'
+__version__ = '1.3.1'
 __title__ = 'dockerw'
 __uri__ = 'https://github.com/kschwab/dockerw'
 __author__ = 'Kyle Schwab'
@@ -55,8 +55,10 @@ from importlib.machinery import SourceFileLoader
 DOCKERW_UID = int(os.environ.get("SUDO_UID", os.getuid()))
 DOCKERW_GID = int(os.environ.get("SUDO_GID", os.getgid()))
 DOCKERW_UNAME = pwd.getpwuid(DOCKERW_UID).pw_name
+DOCKERW_UHOME = pathlib.PosixPath(pwd.getpwnam(DOCKERW_UNAME).pw_dir).parent.resolve()
 DOCKERW_VENV_PATH = pathlib.PosixPath(f'/.dockerw')
-DOCKERW_VENV_HOME_PATH = DOCKERW_VENV_PATH / f'home/{DOCKERW_UNAME}'
+DOCKERW_VENV_HOME_PATH = DOCKERW_VENV_PATH / f'home'
+DOCKERW_VENV_UHOME_PATH = DOCKERW_VENV_HOME_PATH / DOCKERW_UNAME
 DOCKERW_VENV_COPY_PATH = DOCKERW_VENV_PATH / 'copy'
 DOCKERW_VENV_RC_PATH   = DOCKERW_VENV_PATH / 'rc.sh'
 DOCKERW_VENV_SH_PATH   = DOCKERW_VENV_PATH / 'venv.sh'
@@ -166,7 +168,7 @@ def _update_volume_paths(volumes: list, is_copy: bool=False) -> list:
                 options = [ opt for opt in options if opt != 'rw'] + ['ro']
             options = ','.join(options)
         elif dest_path.startswith(f'/home/{DOCKERW_UNAME}'):
-            dest_path = dest_path.replace(f'/home/{DOCKERW_UNAME}', f'{DOCKERW_VENV_HOME_PATH}', 1)
+            dest_path = dest_path.replace(f'/home/{DOCKERW_UNAME}', f'{DOCKERW_VENV_UHOME_PATH}', 1)
         volumes[volume] = f'{src_path}:{dest_path}{":" + options if options else ""}'
     return volumes
 
@@ -429,8 +431,8 @@ def _write_venv_entrypoint(venv_file: typing.TextIO, parsed_args: argparse.Names
         """))
 
     venv_file.write(textwrap.dedent(f"""
-        mkdir -p {DOCKERW_VENV_HOME_PATH}
-        {'cp' if parsed_args.cache_cmd else 'mv'} {venv_file.name} {DOCKERW_VENV_HOME_PATH}/.dockerw_entrypoint.sh
+        mkdir -p {DOCKERW_VENV_UHOME_PATH}
+        {'cp' if parsed_args.cache_cmd else 'mv'} {venv_file.name} {DOCKERW_VENV_UHOME_PATH}/.dockerw_entrypoint.sh
         rm {venv_file.name}_*
         _existing_user=$(awk -v uid={DOCKERW_UID} -F":" '{{ if($3==uid){{print $1}} }}' /etc/passwd 2>/dev/null)
         if [ -n "$_existing_user" ]; then
@@ -455,10 +457,19 @@ def _write_venv_entrypoint(venv_file: typing.TextIO, parsed_args: argparse.Names
           addgroup {DOCKERW_UNAME} wheel > /dev/null 2>&1
         fi
         mkdir -p /home/{DOCKERW_UNAME}
-        cp -a /home/{DOCKERW_UNAME} /.dockerw/home
+        cp -a /home/{DOCKERW_UNAME} {DOCKERW_VENV_HOME_PATH}
+        if [ "{DOCKERW_UHOME}" != "/home" ]; then
+          if [ -e {DOCKERW_UHOME}/{DOCKERW_UNAME} ]; then
+            mv {DOCKERW_UHOME}/{DOCKERW_UNAME} {DOCKERW_UHOME}/_venv_orig_user_{DOCKERW_UNAME}
+          else
+            mkdir -p {DOCKERW_UHOME}
+          fi
+          ln -s /home/{DOCKERW_UNAME} {DOCKERW_UHOME}/{DOCKERW_UNAME}
+          chown -h {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_UHOME}/{DOCKERW_UNAME} > /dev/null 2>&1
+        fi
         rm -rf /home/{DOCKERW_UNAME}
-        mv {DOCKERW_VENV_HOME_PATH} /home
-        rmdir /.dockerw/home > /dev/null 2>&1
+        mv {DOCKERW_VENV_UHOME_PATH} /home
+        rmdir {DOCKERW_VENV_HOME_PATH} > /dev/null 2>&1
         rmdir /.dockerw > /dev/null 2>&1
         passwd -d {DOCKERW_UNAME} > /dev/null 2>&1
         echo "{DOCKERW_UNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
@@ -665,7 +676,10 @@ def dockerw_run(args: list) -> None:
         args.env.append(f'DOCKERW_VENV_IMG_TAG={image_tag}')
         oldmask = os.umask(0o000)
         pathlib.Path('/tmp/dockerw').mkdir(parents=True, exist_ok=True)
-        os.chmod('/tmp/dockerw', 0o777)
+        try:
+            os.chmod('/tmp/dockerw', 0o777)
+        except Exception:
+            pass
         venv_entrypoint_file = tempfile.NamedTemporaryFile('w', dir='/tmp/dockerw', delete=False)
         _write_venv_sh(venv_entrypoint_file.name, args)
         _write_venv_rc_sh(venv_entrypoint_file.name, args)
