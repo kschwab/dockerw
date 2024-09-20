@@ -55,10 +55,8 @@ from importlib.machinery import SourceFileLoader
 DOCKERW_UID = int(os.environ.get("SUDO_UID", os.getuid()))
 DOCKERW_GID = int(os.environ.get("SUDO_GID", os.getgid()))
 DOCKERW_UNAME = pwd.getpwuid(DOCKERW_UID).pw_name
-DOCKERW_UHOME = pathlib.PosixPath(pwd.getpwnam(DOCKERW_UNAME).pw_dir).parent.resolve()
 DOCKERW_VENV_PATH = pathlib.PosixPath(f'/.dockerw')
-DOCKERW_VENV_HOME_PATH = DOCKERW_VENV_PATH / f'home'
-DOCKERW_VENV_UHOME_PATH = DOCKERW_VENV_HOME_PATH / DOCKERW_UNAME
+DOCKERW_VENV_UHOME_PATH = DOCKERW_VENV_PATH / f'home/{DOCKERW_UNAME}'
 DOCKERW_VENV_COPY_PATH = DOCKERW_VENV_PATH / 'copy'
 DOCKERW_VENV_RC_PATH   = DOCKERW_VENV_PATH / 'rc.sh'
 DOCKERW_VENV_SH_PATH   = DOCKERW_VENV_PATH / 'venv.sh'
@@ -457,19 +455,10 @@ def _write_venv_entrypoint(venv_file: typing.TextIO, parsed_args: argparse.Names
           addgroup {DOCKERW_UNAME} wheel > /dev/null 2>&1
         fi
         mkdir -p /home/{DOCKERW_UNAME}
-        cp -a /home/{DOCKERW_UNAME} {DOCKERW_VENV_HOME_PATH}
-        if [ "{DOCKERW_UHOME}" != "/home" ]; then
-          if [ -e {DOCKERW_UHOME}/{DOCKERW_UNAME} ]; then
-            mv {DOCKERW_UHOME}/{DOCKERW_UNAME} {DOCKERW_UHOME}/_venv_orig_user_{DOCKERW_UNAME}
-          else
-            mkdir -p {DOCKERW_UHOME}
-          fi
-          ln -s /home/{DOCKERW_UNAME} {DOCKERW_UHOME}/{DOCKERW_UNAME}
-          chown -h {DOCKERW_UID}:{DOCKERW_GID} {DOCKERW_UHOME}/{DOCKERW_UNAME} > /dev/null 2>&1
-        fi
+        cp -a /home/{DOCKERW_UNAME} /.dockerw/home
         rm -rf /home/{DOCKERW_UNAME}
         mv {DOCKERW_VENV_UHOME_PATH} /home
-        rmdir {DOCKERW_VENV_HOME_PATH} > /dev/null 2>&1
+        rmdir /.dockerw/home > /dev/null 2>&1
         rmdir /.dockerw > /dev/null 2>&1
         passwd -d {DOCKERW_UNAME} > /dev/null 2>&1
         echo "{DOCKERW_UNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
